@@ -5,14 +5,13 @@ from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import Table
-from sqlalchemy import testing
 from sqlalchemy import Unicode
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Session
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import fixtures
 
@@ -20,11 +19,11 @@ from sqlalchemy.testing import fixtures
 class CompileTest(fixtures.ORMTest):
     """test various mapper compilation scenarios"""
 
-    def teardown(self):
+    def teardown_test(self):
         clear_mappers()
 
     def test_with_polymorphic(self):
-        metadata = MetaData(testing.db)
+        metadata = MetaData()
 
         order = Table(
             "orders",
@@ -122,7 +121,7 @@ class CompileTest(fixtures.ORMTest):
     def test_conflicting_backref_one(self):
         """test that conflicting backrefs raises an exception"""
 
-        metadata = MetaData(testing.db)
+        metadata = MetaData()
 
         order = Table(
             "orders",
@@ -190,8 +189,7 @@ class CompileTest(fixtures.ORMTest):
             sa_exc.ArgumentError, "Error creating backref", configure_mappers
         )
 
-    def test_misc_one(self):
-        metadata = MetaData(testing.db)
+    def test_misc_one(self, connection, metadata):
         node_table = Table(
             "node",
             metadata,
@@ -212,33 +210,30 @@ class CompileTest(fixtures.ORMTest):
             Column("host_id", Integer, primary_key=True),
             Column("hostname", String(64), nullable=False, unique=True),
         )
-        metadata.create_all()
-        try:
-            node_table.insert().execute(node_id=1, node_index=5)
+        metadata.create_all(connection)
+        connection.execute(node_table.insert(), dict(node_id=1, node_index=5))
 
-            class Node(object):
-                pass
+        class Node(object):
+            pass
 
-            class NodeName(object):
-                pass
+        class NodeName(object):
+            pass
 
-            class Host(object):
-                pass
+        class Host(object):
+            pass
 
-            mapper(Node, node_table)
-            mapper(Host, host_table)
-            mapper(
-                NodeName,
-                node_name_table,
-                properties={
-                    "node": relationship(Node, backref=backref("names")),
-                    "host": relationship(Host),
-                },
-            )
-            sess = create_session()
-            assert sess.query(Node).get(1).names == []
-        finally:
-            metadata.drop_all()
+        mapper(Node, node_table)
+        mapper(Host, host_table)
+        mapper(
+            NodeName,
+            node_name_table,
+            properties={
+                "node": relationship(Node, backref=backref("names")),
+                "host": relationship(Host),
+            },
+        )
+        sess = Session(connection)
+        assert sess.query(Node).get(1).names == []
 
     def test_conflicting_backref_two(self):
         meta = MetaData()

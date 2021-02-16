@@ -258,9 +258,9 @@ discriminator column is also required on the base table so that classes can be
 differentiated from each other.
 
 Even though subclasses share the base table for all of their attributes,
-when using Declarative,  :class:`.Column` objects may still be specified on
+when using Declarative,  :class:`_schema.Column` objects may still be specified on
 subclasses, indicating that the column is to be mapped only to that subclass;
-the :class:`.Column` will be applied to the same base :class:`.Table` object::
+the :class:`_schema.Column` will be applied to the same base :class:`_schema.Table` object::
 
     class Employee(Base):
         __tablename__ = 'employee'
@@ -290,6 +290,108 @@ the :class:`.Column` will be applied to the same base :class:`.Table` object::
 Note that the mappers for the derived classes Manager and Engineer omit the
 ``__tablename__``, indicating they do not have a mapped table of
 their own.
+
+.. _orm_inheritance_column_conflicts:
+
+Resolving Column Conflicts
++++++++++++++++++++++++++++
+
+Note in the previous section that the ``manager_name`` and ``engineer_info`` columns
+are "moved up" to be applied to ``Employee.__table__``, as a result of their
+declaration on a subclass that has no table of its own.   A tricky case
+comes up when two subclasses want to specify *the same* column, as below::
+
+    class Employee(Base):
+        __tablename__ = 'employee'
+        id = Column(Integer, primary_key=True)
+        name = Column(String(50))
+        type = Column(String(20))
+
+        __mapper_args__ = {
+            'polymorphic_on':type,
+            'polymorphic_identity':'employee'
+        }
+
+    class Engineer(Employee):
+        __mapper_args__ = {'polymorphic_identity': 'engineer'}
+        start_date = Column(DateTime)
+
+    class Manager(Employee):
+        __mapper_args__ = {'polymorphic_identity': 'manager'}
+        start_date = Column(DateTime)
+
+Above, the ``start_date`` column declared on both ``Engineer`` and ``Manager``
+will result in an error::
+
+    sqlalchemy.exc.ArgumentError: Column 'start_date' on class
+    <class '__main__.Manager'> conflicts with existing
+    column 'employee.start_date'
+
+The above scenario presents an ambiguity to the Declarative mapping system that
+may be resolved by using
+:class:`.declared_attr` to define the :class:`_schema.Column` conditionally,
+taking care to return the **existing column** via the parent ``__table__``
+if it already exists::
+
+    from sqlalchemy.orm import declared_attr
+
+    class Employee(Base):
+        __tablename__ = 'employee'
+        id = Column(Integer, primary_key=True)
+        name = Column(String(50))
+        type = Column(String(20))
+
+        __mapper_args__ = {
+            'polymorphic_on':type,
+            'polymorphic_identity':'employee'
+        }
+
+    class Engineer(Employee):
+        __mapper_args__ = {'polymorphic_identity': 'engineer'}
+
+        @declared_attr
+        def start_date(cls):
+            "Start date column, if not present already."
+            return Employee.__table__.c.get('start_date', Column(DateTime))
+
+    class Manager(Employee):
+        __mapper_args__ = {'polymorphic_identity': 'manager'}
+
+        @declared_attr
+        def start_date(cls):
+            "Start date column, if not present already."
+            return Employee.__table__.c.get('start_date', Column(DateTime))
+
+Above, when ``Manager`` is mapped, the ``start_date`` column is
+already present on the ``Employee`` class; by returning the existing
+:class:`_schema.Column` object, the declarative system recognizes that this
+is the same column to be mapped to the two different subclasses separately.
+
+A similar concept can be used with mixin classes (see :ref:`orm_mixins_toplevel`)
+to define a particular series of columns and/or other mapped attributes
+from a reusable mixin class::
+
+    class Employee(Base):
+        __tablename__ = 'employee'
+        id = Column(Integer, primary_key=True)
+        name = Column(String(50))
+        type = Column(String(20))
+
+        __mapper_args__ = {
+            'polymorphic_on':type,
+            'polymorphic_identity':'employee'
+        }
+
+    class HasStartDate:
+        @declared_attr
+        def start_date(cls):
+            return cls.__table__.c.get('start_date', Column(DateTime))
+
+    class Engineer(HasStartDate, Employee):
+        __mapper_args__ = {'polymorphic_identity': 'engineer'}
+
+    class Manager(HasStartDate, Employee):
+        __mapper_args__ = {'polymorphic_identity': 'manager'}
 
 Relationships with Single Table Inheritance
 +++++++++++++++++++++++++++++++++++++++++++
@@ -378,6 +480,7 @@ Above, the ``Manager`` class will have a ``Manager.company`` attribute;
 ``Company`` will have a ``Company.managers`` attribute that always
 loads against the ``employee`` with an additional WHERE clause that
 limits rows to those with ``type = 'manager'``.
+
 
 Loading Single Inheritance Mappings
 +++++++++++++++++++++++++++++++++++
@@ -483,13 +586,13 @@ constructed using a SQLAlchemy helper :func:`.polymorphic_union`.
 As discussed in :ref:`inheritance_loading_toplevel`, mapper inheritance
 configurations of any type can be configured to load from a special selectable
 by default using the :paramref:`.mapper.with_polymorphic` argument.  Current
-public API requires that this argument is set on a :class:`.Mapper` when
+public API requires that this argument is set on a :class:`_orm.Mapper` when
 it is first constructed.
 
-However, in the case of Declarative, both the mapper and the :class:`.Table`
+However, in the case of Declarative, both the mapper and the :class:`_schema.Table`
 that is mapped are created at once, the moment the mapped class is defined.
 This means that the :paramref:`.mapper.with_polymorphic` argument cannot
-be provided yet, since the :class:`.Table` objects that correspond to the
+be provided yet, since the :class:`_schema.Table` objects that correspond to the
 subclasses haven't yet been defined.
 
 There are a few strategies available to resolve this cycle, however
@@ -631,8 +734,8 @@ domain of concrete inheritance, and we must build a special mapper against
 .. topic:: Mappers can always SELECT
 
     In SQLAlchemy, a mapper for a class always has to refer to some
-    "selectable", which is normally a :class:`.Table` but may also refer to any
-    :func:`.select` object as well.   While it may appear that a "single table
+    "selectable", which is normally a :class:`_schema.Table` but may also refer to any
+    :func:`_expression.select` object as well.   While it may appear that a "single table
     inheritance" mapper does not map to a table, these mappers in fact
     implicitly refer to the table that is mapped by a superclass.
 
@@ -680,9 +783,6 @@ With a mapping like the above, only instances of ``Manager`` and ``Engineer``
 may be persisted; querying against the ``Employee`` class will always produce
 ``Manager`` and ``Engineer`` objects.
 
-.. seealso::
-
-    :ref:`declarative_concrete_table` - in the Declarative reference documentation
 
 Classical and Semi-Classical Concrete Polymorphic Configuration
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -690,13 +790,13 @@ Classical and Semi-Classical Concrete Polymorphic Configuration
 The Declarative configurations illustrated with :class:`.ConcreteBase`
 and :class:`.AbstractConcreteBase` are equivalent to two other forms
 of configuration that make use of :func:`.polymorphic_union` explicitly.
-These configurational forms make use of the :class:`.Table` object explicitly
+These configurational forms make use of the :class:`_schema.Table` object explicitly
 so that the "polymorphic union" can be created first, then applied
 to the mappings.   These are illustrated here to clarify the role
 of the :func:`.polymorphic_union` function in terms of mapping.
 
 A **semi-classical mapping** for example makes use of Declarative, but
-establishes the :class:`.Table` objects separately::
+establishes the :class:`_schema.Table` objects separately::
 
     metadata = Base.metadata
 
@@ -730,7 +830,7 @@ Next, the UNION is produced using :func:`.polymorphic_union`::
         'engineer': engineers_table
     }, 'type', 'pjoin')
 
-With the above :class:`.Table` objects, the mappings can be produced using "semi-classical" style,
+With the above :class:`_schema.Table` objects, the mappings can be produced using "semi-classical" style,
 where we use Declarative in conjunction with the ``__table__`` argument;
 our polymorphic union above is passed via ``__mapper_args__`` to
 the :paramref:`.mapper.with_polymorphic` parameter::
@@ -755,7 +855,7 @@ the :paramref:`.mapper.with_polymorphic` parameter::
             'polymorphic_identity': 'manager',
             'concrete': True}
 
-Alternatively, the same :class:`.Table` objects can be used in
+Alternatively, the same :class:`_schema.Table` objects can be used in
 fully "classical" style, without using Declarative at all.
 A constructor similar to that supplied by Declarative is illustrated::
 
@@ -770,17 +870,27 @@ A constructor similar to that supplied by Declarative is illustrated::
     class Engineer(Employee):
         pass
 
-    employee_mapper = mapper(Employee, pjoin,
-                                        with_polymorphic=('*', pjoin),
-                                        polymorphic_on=pjoin.c.type)
-    manager_mapper = mapper(Manager, managers_table,
-                                        inherits=employee_mapper,
-                                        concrete=True,
-                                        polymorphic_identity='manager')
-    engineer_mapper = mapper(Engineer, engineers_table,
-                                        inherits=employee_mapper,
-                                        concrete=True,
-                                        polymorphic_identity='engineer')
+    employee_mapper = mapper_registry.map_imperatively(
+        Employee,
+        pjoin,
+        with_polymorphic=('*', pjoin),
+        polymorphic_on=pjoin.c.type,
+    )
+    manager_mapper = mapper_registry.map_imperatively(
+        Manager,
+        managers_table,
+        inherits=employee_mapper,
+        concrete=True,
+        polymorphic_identity='manager',
+    )
+    engineer_mapper = mapper_registry.map_imperatively(
+        Engineer,
+        engineers_table,
+        inherits=employee_mapper,
+        concrete=True,
+        polymorphic_identity='engineer',
+    )
+
 
 
 The "abstract" example can also be mapped using "semi-classical" or "classical"
@@ -891,14 +1001,14 @@ such a configuration is as follows::
 The next complexity with concrete inheritance and relationships involves
 when we'd like one or all of ``Employee``, ``Manager`` and ``Engineer`` to
 themselves refer back to ``Company``.   For this case, SQLAlchemy has
-special behavior in that a :func:`.relationship` placed on ``Employee``
+special behavior in that a :func:`_orm.relationship` placed on ``Employee``
 which links to ``Company`` **does not work**
 against the ``Manager`` and ``Engineer`` classes, when exercised at the
 instance level.  Instead, a distinct
-:func:`.relationship` must be applied to each class.   In order to achieve
+:func:`_orm.relationship` must be applied to each class.   In order to achieve
 bi-directional behavior in terms of three separate relationships which
 serve as the opposite of ``Company.employees``, the
-:paramref:`.relationship.back_populates` parameter is used between
+:paramref:`_orm.relationship.back_populates` parameter is used between
 each of the relationships::
 
     from sqlalchemy.ext.declarative import ConcreteBase
@@ -961,7 +1071,7 @@ Loading Concrete Inheritance Mappings
 The options for loading with concrete inheritance are limited; generally,
 if polymorphic loading is configured on the mapper using one of the
 declarative concrete mixins, it can't be modified at query time
-in current SQLAlchemy versions.   Normally, the :func:`.orm.with_polymorphic`
+in current SQLAlchemy versions.   Normally, the :func:`_orm.with_polymorphic`
 function would be able to override the style of loading used by concrete,
 however due to current limitations this is not yet supported.
 

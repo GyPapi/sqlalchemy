@@ -11,7 +11,6 @@ from sqlalchemy.schema import AddConstraint
 from sqlalchemy.schema import CheckConstraint
 from sqlalchemy.schema import DDL
 from sqlalchemy.schema import DropConstraint
-from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
@@ -22,7 +21,7 @@ from sqlalchemy.testing.schema import Table
 
 
 class DDLEventTest(fixtures.TestBase):
-    def setup(self):
+    def setup_test(self):
         self.bind = engines.mock_engine()
         self.metadata = MetaData()
         self.table = Table("t", self.metadata, Column("id", Integer))
@@ -375,9 +374,9 @@ class DDLEventTest(fixtures.TestBase):
 
 
 class DDLExecutionTest(fixtures.TestBase):
-    def setup(self):
+    def setup_test(self):
         self.engine = engines.mock_engine()
-        self.metadata = MetaData(self.engine)
+        self.metadata = MetaData()
         self.users = Table(
             "users",
             self.metadata,
@@ -392,14 +391,14 @@ class DDLExecutionTest(fixtures.TestBase):
         event.listen(users, "before_drop", DDL("xyzzy"))
         event.listen(users, "after_drop", DDL("fnord"))
 
-        users.create()
+        users.create(self.engine)
         strings = [str(x) for x in engine.mock]
         assert "mxyzptlk" in strings
         assert "klptzyxm" in strings
         assert "xyzzy" not in strings
         assert "fnord" not in strings
         del engine.mock[:]
-        users.drop()
+        users.drop(self.engine)
         strings = [str(x) for x in engine.mock]
         assert "mxyzptlk" not in strings
         assert "klptzyxm" not in strings
@@ -414,14 +413,14 @@ class DDLExecutionTest(fixtures.TestBase):
         event.listen(users, "before_drop", DDL("xyzzy"))
         event.listen(users, "after_drop", DDL("fnord"))
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
         strings = [str(x) for x in engine.mock]
         assert "mxyzptlk" in strings
         assert "klptzyxm" in strings
         assert "xyzzy" not in strings
         assert "fnord" not in strings
         del engine.mock[:]
-        metadata.drop_all()
+        metadata.drop_all(self.engine)
         strings = [str(x) for x in engine.mock]
         assert "mxyzptlk" not in strings
         assert "klptzyxm" not in strings
@@ -436,14 +435,14 @@ class DDLExecutionTest(fixtures.TestBase):
         event.listen(metadata, "before_drop", DDL("xyzzy"))
         event.listen(metadata, "after_drop", DDL("fnord"))
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
         strings = [str(x) for x in engine.mock]
         assert "mxyzptlk" in strings
         assert "klptzyxm" in strings
         assert "xyzzy" not in strings
         assert "fnord" not in strings
         del engine.mock[:]
-        metadata.drop_all()
+        metadata.drop_all(self.engine)
         strings = [str(x) for x in engine.mock]
         assert "mxyzptlk" not in strings
         assert "klptzyxm" not in strings
@@ -490,35 +489,11 @@ class DDLExecutionTest(fixtures.TestBase):
     def test_ddl_execute(self):
         engine = create_engine("sqlite:///")
         cx = engine.connect()
-        table = self.users
+        cx.begin()
         ddl = DDL("SELECT 1")
 
-        for spec in (
-            (engine.execute, ddl),
-            (engine.execute, ddl, table),
-            (cx.execute, ddl),
-            (cx.execute, ddl, table),
-            (ddl.execute, engine),
-            (ddl.execute, engine, table),
-            (ddl.execute, cx),
-            (ddl.execute, cx, table),
-        ):
-            fn = spec[0]
-            arg = spec[1:]
-            r = fn(*arg)
-            eq_(list(r), [(1,)])
-
-        for fn, kw in ((ddl.execute, {}), (ddl.execute, dict(target=table))):
-            assert_raises(tsa.exc.UnboundExecutionError, fn, **kw)
-
-        for bind in engine, cx:
-            ddl.bind = bind
-            for fn, kw in (
-                (ddl.execute, {}),
-                (ddl.execute, dict(target=table)),
-            ):
-                r = fn(**kw)
-                eq_(list(r), [(1,)])
+        r = cx.execute(ddl)
+        eq_(list(r), [(1,)])
 
     def test_platform_escape(self):
         """test the escaping of % characters in the DDL construct."""
@@ -547,6 +522,163 @@ class DDLExecutionTest(fixtures.TestBase):
                 ).scalar(),
                 "foo%something",
             )
+
+
+class DDLTransactionTest(fixtures.TestBase):
+    """test DDL transactional behavior as of SQLAlchemy 1.4."""
+
+    @testing.fixture
+    def metadata_fixture(self):
+        m = MetaData()
+        Table("t1", m, Column("q", Integer))
+        Table("t2", m, Column("q", Integer))
+
+        try:
+            yield m
+        finally:
+            m.drop_all(testing.db)
+
+    def _listening_engine_fixture(self, future=False):
+        eng = engines.testing_engine(future=future)
+
+        m1 = mock.Mock()
+
+        event.listen(eng, "begin", m1.begin)
+        event.listen(eng, "commit", m1.commit)
+        event.listen(eng, "rollback", m1.rollback)
+
+        @event.listens_for(eng, "before_cursor_execute")
+        def before_cursor_execute(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            if "CREATE TABLE" in statement:
+                m1.cursor_execute("CREATE TABLE ...")
+
+        eng.connect().close()
+
+        return eng, m1
+
+    @testing.fixture
+    def listening_engine_fixture(self):
+        return self._listening_engine_fixture(future=False)
+
+    @testing.fixture
+    def future_listening_engine_fixture(self):
+        return self._listening_engine_fixture(future=True)
+
+    def test_ddl_legacy_engine(
+        self, metadata_fixture, listening_engine_fixture
+    ):
+        eng, m1 = listening_engine_fixture
+
+        metadata_fixture.create_all(eng)
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call.begin(mock.ANY),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.commit(mock.ANY),
+            ],
+        )
+
+    def test_ddl_future_engine(
+        self, metadata_fixture, future_listening_engine_fixture
+    ):
+        eng, m1 = future_listening_engine_fixture
+
+        metadata_fixture.create_all(eng)
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call.begin(mock.ANY),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.commit(mock.ANY),
+            ],
+        )
+
+    def test_ddl_legacy_connection_no_transaction(
+        self, metadata_fixture, listening_engine_fixture
+    ):
+        eng, m1 = listening_engine_fixture
+
+        with eng.connect() as conn:
+            with testing.expect_deprecated(
+                "The current statement is being autocommitted using "
+                "implicit autocommit"
+            ):
+                metadata_fixture.create_all(conn)
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.commit(mock.ANY),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.commit(mock.ANY),
+            ],
+        )
+
+    def test_ddl_legacy_connection_transaction(
+        self, metadata_fixture, listening_engine_fixture
+    ):
+        eng, m1 = listening_engine_fixture
+
+        with eng.connect() as conn:
+            with conn.begin():
+                metadata_fixture.create_all(conn)
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call.begin(mock.ANY),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.commit(mock.ANY),
+            ],
+        )
+
+    def test_ddl_future_connection_autobegin_transaction(
+        self, metadata_fixture, future_listening_engine_fixture
+    ):
+        eng, m1 = future_listening_engine_fixture
+
+        with eng.connect() as conn:
+            metadata_fixture.create_all(conn)
+
+            conn.commit()
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call.begin(mock.ANY),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.commit(mock.ANY),
+            ],
+        )
+
+    def test_ddl_future_connection_explicit_begin_transaction(
+        self, metadata_fixture, future_listening_engine_fixture
+    ):
+        eng, m1 = future_listening_engine_fixture
+
+        with eng.connect() as conn:
+            with conn.begin():
+                metadata_fixture.create_all(conn)
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call.begin(mock.ANY),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.cursor_execute("CREATE TABLE ..."),
+                mock.call.commit(mock.ANY),
+            ],
+        )
 
 
 class DDLTest(fixtures.TestBase, AssertsCompiledSQL):

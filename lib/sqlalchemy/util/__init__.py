@@ -1,5 +1,5 @@
 # util/__init__.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -12,10 +12,13 @@ from functools import partial  # noqa
 from functools import update_wrapper  # noqa
 
 from ._collections import coerce_generator_arg  # noqa
+from ._collections import coerce_to_immutabledict  # noqa
 from ._collections import collections_abc  # noqa
 from ._collections import column_dict  # noqa
 from ._collections import column_set  # noqa
+from ._collections import EMPTY_DICT  # noqa
 from ._collections import EMPTY_SET  # noqa
+from ._collections import FacadeDict  # noqa
 from ._collections import flatten_iterator  # noqa
 from ._collections import has_dupes  # noqa
 from ._collections import has_intersection  # noqa
@@ -23,8 +26,6 @@ from ._collections import IdentitySet  # noqa
 from ._collections import ImmutableContainer  # noqa
 from ._collections import immutabledict  # noqa
 from ._collections import ImmutableProperties  # noqa
-from ._collections import KeyedTuple  # noqa
-from ._collections import lightweight_named_tuple  # noqa
 from ._collections import LRUCache  # noqa
 from ._collections import ordered_column_set  # noqa
 from ._collections import OrderedDict  # noqa
@@ -34,6 +35,7 @@ from ._collections import OrderedSet  # noqa
 from ._collections import PopulateDict  # noqa
 from ._collections import Properties  # noqa
 from ._collections import ScopedRegistry  # noqa
+from ._collections import sort_dictionary  # noqa
 from ._collections import ThreadLocalRegistry  # noqa
 from ._collections import to_column_set  # noqa
 from ._collections import to_list  # noqa
@@ -43,6 +45,10 @@ from ._collections import UniqueAppender  # noqa
 from ._collections import update_copy  # noqa
 from ._collections import WeakPopulateDict  # noqa
 from ._collections import WeakSequence  # noqa
+from ._preloaded import preload_module  # noqa
+from ._preloaded import preloaded  # noqa
+from .compat import ABC  # noqa
+from .compat import arm  # noqa
 from .compat import b  # noqa
 from .compat import b64decode  # noqa
 from .compat import b64encode  # noqa
@@ -51,6 +57,7 @@ from .compat import byte_buffer  # noqa
 from .compat import callable  # noqa
 from .compat import cmp  # noqa
 from .compat import cpython  # noqa
+from .compat import dataclass_fields  # noqa
 from .compat import decode_backslashreplace  # noqa
 from .compat import dottedgetter  # noqa
 from .compat import has_refcount_gc  # noqa
@@ -59,21 +66,24 @@ from .compat import int_types  # noqa
 from .compat import iterbytes  # noqa
 from .compat import itertools_filter  # noqa
 from .compat import itertools_filterfalse  # noqa
+from .compat import local_dataclass_fields  # noqa
 from .compat import namedtuple  # noqa
-from .compat import nested  # noqa
 from .compat import next  # noqa
+from .compat import nullcontext  # noqa
+from .compat import osx  # noqa
 from .compat import parse_qsl  # noqa
+from .compat import perf_counter  # noqa
 from .compat import pickle  # noqa
 from .compat import print_  # noqa
 from .compat import py2k  # noqa
-from .compat import py33  # noqa
-from .compat import py36  # noqa
+from .compat import py37  # noqa
 from .compat import py3k  # noqa
+from .compat import pypy  # noqa
 from .compat import quote_plus  # noqa
+from .compat import raise_  # noqa
 from .compat import raise_from_cause  # noqa
 from .compat import reduce  # noqa
 from .compat import reraise  # noqa
-from .compat import safe_kwarg  # noqa
 from .compat import string_types  # noqa
 from .compat import StringIO  # noqa
 from .compat import text_type  # noqa
@@ -87,13 +97,20 @@ from .compat import unquote_plus  # noqa
 from .compat import win32  # noqa
 from .compat import with_metaclass  # noqa
 from .compat import zip_longest  # noqa
+from .concurrency import asyncio  # noqa
+from .concurrency import await_fallback  # noqa
+from .concurrency import await_only  # noqa
+from .concurrency import greenlet_spawn  # noqa
 from .deprecations import deprecated  # noqa
+from .deprecations import deprecated_20  # noqa
+from .deprecations import deprecated_20_cls  # noqa
 from .deprecations import deprecated_cls  # noqa
 from .deprecations import deprecated_params  # noqa
 from .deprecations import inject_docstring_text  # noqa
-from .deprecations import pending_deprecation  # noqa
+from .deprecations import moved_20  # noqa
+from .deprecations import SQLALCHEMY_WARN_20  # noqa
 from .deprecations import warn_deprecated  # noqa
-from .deprecations import warn_pending_deprecation  # noqa
+from .deprecations import warn_deprecated_20  # noqa
 from .langhelpers import add_parameter_text  # noqa
 from .langhelpers import as_interface  # noqa
 from .langhelpers import asbool  # noqa
@@ -109,9 +126,9 @@ from .langhelpers import coerce_kw_type  # noqa
 from .langhelpers import constructor_copy  # noqa
 from .langhelpers import constructor_key  # noqa
 from .langhelpers import counter  # noqa
+from .langhelpers import create_proxy_methods  # noqa
 from .langhelpers import decode_slice  # noqa
 from .langhelpers import decorator  # noqa
-from .langhelpers import dependencies  # noqa
 from .langhelpers import dictlike_iteritems  # noqa
 from .langhelpers import duck_type_collection  # noqa
 from .langhelpers import ellipses_string  # noqa
@@ -123,7 +140,7 @@ from .langhelpers import get_callable_argspec  # noqa
 from .langhelpers import get_cls_kwargs  # noqa
 from .langhelpers import get_func_kwargs  # noqa
 from .langhelpers import getargspec_init  # noqa
-from .langhelpers import group_expirable_memoized_property  # noqa
+from .langhelpers import HasMemoized  # noqa
 from .langhelpers import hybridmethod  # noqa
 from .langhelpers import hybridproperty  # noqa
 from .langhelpers import iterate_attributes  # noqa
@@ -132,6 +149,7 @@ from .langhelpers import md5_hex  # noqa
 from .langhelpers import memoized_instancemethod  # noqa
 from .langhelpers import memoized_property  # noqa
 from .langhelpers import MemoizedSlots  # noqa
+from .langhelpers import method_is_overridden  # noqa
 from .langhelpers import methods_equivalent  # noqa
 from .langhelpers import monkeypatch_proxied_specials  # noqa
 from .langhelpers import NoneType  # noqa
@@ -144,11 +162,8 @@ from .langhelpers import set_creation_order  # noqa
 from .langhelpers import string_or_unprintable  # noqa
 from .langhelpers import symbol  # noqa
 from .langhelpers import unbound_method_to_callable  # noqa
+from .langhelpers import walk_subclasses  # noqa
 from .langhelpers import warn  # noqa
 from .langhelpers import warn_exception  # noqa
 from .langhelpers import warn_limited  # noqa
 from .langhelpers import wrap_callable  # noqa
-
-
-# things that used to be not always available,
-# but are now as of current support Python versions

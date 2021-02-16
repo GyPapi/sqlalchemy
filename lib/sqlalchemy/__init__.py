@@ -1,5 +1,5 @@
 # sqlalchemy/__init__.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -21,6 +21,7 @@ from .schema import DefaultClause  # noqa
 from .schema import FetchedValue  # noqa
 from .schema import ForeignKey  # noqa
 from .schema import ForeignKeyConstraint  # noqa
+from .schema import Identity  # noqa
 from .schema import Index  # noqa
 from .schema import MetaData  # noqa
 from .schema import PrimaryKeyConstraint  # noqa
@@ -53,12 +54,19 @@ from .sql import insert  # noqa
 from .sql import intersect  # noqa
 from .sql import intersect_all  # noqa
 from .sql import join  # noqa
+from .sql import LABEL_STYLE_DEFAULT  # noqa
+from .sql import LABEL_STYLE_DISAMBIGUATE_ONLY  # noqa
+from .sql import LABEL_STYLE_NONE  # noqa
+from .sql import LABEL_STYLE_TABLENAME_PLUS_COL  # noqa
+from .sql import lambda_stmt  # noqa
 from .sql import lateral  # noqa
 from .sql import literal  # noqa
 from .sql import literal_column  # noqa
 from .sql import modifier  # noqa
 from .sql import not_  # noqa
 from .sql import null  # noqa
+from .sql import nulls_first  # noqa
+from .sql import nulls_last  # noqa
 from .sql import nullsfirst  # noqa
 from .sql import nullslast  # noqa
 from .sql import or_  # noqa
@@ -76,12 +84,12 @@ from .sql import type_coerce  # noqa
 from .sql import union  # noqa
 from .sql import union_all  # noqa
 from .sql import update  # noqa
+from .sql import values  # noqa
 from .sql import within_group  # noqa
 from .types import ARRAY  # noqa
 from .types import BIGINT  # noqa
 from .types import BigInteger  # noqa
 from .types import BINARY  # noqa
-from .types import Binary  # noqa
 from .types import BLOB  # noqa
 from .types import BOOLEAN  # noqa
 from .types import Boolean  # noqa
@@ -122,7 +130,7 @@ from .types import VARBINARY  # noqa
 from .types import VARCHAR  # noqa
 
 
-__version__ = "1.4.0b1"
+__version__ = "1.4.0"
 
 
 def __go(lcls):
@@ -139,7 +147,11 @@ def __go(lcls):
         if not (name.startswith("_") or _inspect.ismodule(obj))
     )
 
-    _sa_util.dependencies.resolve_all("sqlalchemy")
+    _sa_util.preloaded.import_prefix("sqlalchemy")
+
+    from . import exc
+
+    exc._version_token = "".join(__version__.split(".")[0:2])
 
 
 __go(locals())

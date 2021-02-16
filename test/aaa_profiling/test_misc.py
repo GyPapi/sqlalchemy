@@ -17,9 +17,9 @@ from sqlalchemy.util import classproperty
 
 
 class EnumTest(fixtures.TestBase):
-    __requires__ = ("cpython",)
+    __requires__ = ("cpython", "python_profiling_backend")
 
-    def setup(self):
+    def setup_test(self):
         class SomeEnum(object):
             # Implements PEP 435 in the minimal fashion needed by SQLAlchemy
 
@@ -50,7 +50,8 @@ class EnumTest(fixtures.TestBase):
 
 
 class CacheKeyTest(fixtures.TestBase):
-    __requires__ = ("cpython",)
+    # python3 is just to have less variability in test counts
+    __requires__ = ("cpython", "python_profiling_backend", "python3")
 
     @testing.fixture(scope="class")
     def mapping_fixture(self):
@@ -98,18 +99,30 @@ class CacheKeyTest(fixtures.TestBase):
 
         return [
             (
-                select([Parent.id, Child.id])
+                select(Parent.id, Child.id)
                 .select_from(ormjoin(Parent, Child, Parent.children))
                 .where(Child.id == 5)
             )
             for i in range(100)
         ]
 
-    @profiling.function_call_count()
-    def test_statement_one(self, stmt_fixture_one):
+    @profiling.function_call_count(variance=0.15, warmup=2)
+    def test_statement_key_is_cached(self, stmt_fixture_one):
         current_key = None
         for stmt in stmt_fixture_one:
             key = stmt._generate_cache_key()
+            assert key is not None
+            if current_key:
+                eq_(key, current_key)
+            else:
+                current_key = key
+
+    @profiling.function_call_count(variance=0.15, warmup=0)
+    def test_statement_key_is_not_cached(self, stmt_fixture_one):
+        current_key = None
+        for stmt in stmt_fixture_one:
+            key = stmt._generate_cache_key()
+            assert key is not None
             if current_key:
                 eq_(key, current_key)
             else:

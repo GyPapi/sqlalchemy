@@ -1,5 +1,5 @@
 # sql/default_comparator.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -57,7 +57,10 @@ def _boolean_compare(
                 negate=negate,
                 modifiers=kwargs,
             )
-        elif op in (operators.is_distinct_from, operators.isnot_distinct_from):
+        elif op in (
+            operators.is_distinct_from,
+            operators.is_not_distinct_from,
+        ):
             return BinaryExpression(
                 expr,
                 coercions.expect(roles.ConstExprRole, obj),
@@ -73,21 +76,21 @@ def _boolean_compare(
                     expr,
                     coercions.expect(roles.ConstExprRole, obj),
                     operators.is_,
-                    negate=operators.isnot,
+                    negate=operators.is_not,
                     type_=result_type,
                 )
-            elif op in (operators.ne, operators.isnot):
+            elif op in (operators.ne, operators.is_not):
                 return BinaryExpression(
                     expr,
                     coercions.expect(roles.ConstExprRole, obj),
-                    operators.isnot,
+                    operators.is_not,
                     negate=operators.is_,
                     type_=result_type,
                 )
             else:
                 raise exc.ArgumentError(
-                    "Only '=', '!=', 'is_()', 'isnot()', "
-                    "'is_distinct_from()', 'isnot_distinct_from()' "
+                    "Only '=', '!=', 'is_()', 'is_not()', "
+                    "'is_distinct_from()', 'is_not_distinct_from()' "
                     "operators can be used with None/True/False"
                 )
     else:
@@ -205,7 +208,7 @@ def _match_impl(expr, op, other, **kw):
             operator=operators.match_op,
         ),
         result_type=type_api.MATCHTYPE,
-        negate=operators.notmatch_op
+        negate=operators.not_match_op
         if op is operators.match_op
         else operators.match_op,
         **kw
@@ -241,7 +244,7 @@ def _between_impl(expr, op, cleft, cright, **kw):
             group_contents=False,
         ),
         op,
-        negate=operators.notbetween_op
+        negate=operators.not_between_op
         if op is operators.between_op
         else operators.between_op,
         modifiers=kw,
@@ -250,6 +253,45 @@ def _between_impl(expr, op, cleft, cright, **kw):
 
 def _collate_impl(expr, op, other, **kw):
     return collate(expr, other)
+
+
+def _regexp_match_impl(expr, op, pattern, flags, **kw):
+    if flags is not None:
+        flags = coercions.expect(
+            roles.BinaryElementRole,
+            flags,
+            expr=expr,
+            operator=operators.regexp_replace_op,
+        )
+    return _boolean_compare(
+        expr,
+        op,
+        pattern,
+        flags=flags,
+        negate=operators.not_regexp_match_op
+        if op is operators.regexp_match_op
+        else operators.regexp_match_op,
+        **kw
+    )
+
+
+def _regexp_replace_impl(expr, op, pattern, replacement, flags, **kw):
+    replacement = coercions.expect(
+        roles.BinaryElementRole,
+        replacement,
+        expr=expr,
+        operator=operators.regexp_replace_op,
+    )
+    if flags is not None:
+        flags = coercions.expect(
+            roles.BinaryElementRole,
+            flags,
+            expr=expr,
+            operator=operators.regexp_replace_op,
+        )
+    return _binary_operate(
+        expr, op, pattern, replacement=replacement, flags=flags, **kw
+    )
 
 
 # a mapping of operators with the method they use, along with
@@ -276,32 +318,35 @@ operator_lookup = {
     "gt": (_boolean_compare, operators.le),
     "ge": (_boolean_compare, operators.lt),
     "eq": (_boolean_compare, operators.ne),
-    "is_distinct_from": (_boolean_compare, operators.isnot_distinct_from),
-    "isnot_distinct_from": (_boolean_compare, operators.is_distinct_from),
-    "like_op": (_boolean_compare, operators.notlike_op),
-    "ilike_op": (_boolean_compare, operators.notilike_op),
-    "notlike_op": (_boolean_compare, operators.like_op),
-    "notilike_op": (_boolean_compare, operators.ilike_op),
-    "contains_op": (_boolean_compare, operators.notcontains_op),
-    "startswith_op": (_boolean_compare, operators.notstartswith_op),
-    "endswith_op": (_boolean_compare, operators.notendswith_op),
+    "is_distinct_from": (_boolean_compare, operators.is_not_distinct_from),
+    "is_not_distinct_from": (_boolean_compare, operators.is_distinct_from),
+    "like_op": (_boolean_compare, operators.not_like_op),
+    "ilike_op": (_boolean_compare, operators.not_ilike_op),
+    "not_like_op": (_boolean_compare, operators.like_op),
+    "not_ilike_op": (_boolean_compare, operators.ilike_op),
+    "contains_op": (_boolean_compare, operators.not_contains_op),
+    "startswith_op": (_boolean_compare, operators.not_startswith_op),
+    "endswith_op": (_boolean_compare, operators.not_endswith_op),
     "desc_op": (_scalar, UnaryExpression._create_desc),
     "asc_op": (_scalar, UnaryExpression._create_asc),
-    "nullsfirst_op": (_scalar, UnaryExpression._create_nullsfirst),
-    "nullslast_op": (_scalar, UnaryExpression._create_nullslast),
-    "in_op": (_in_impl, operators.notin_op),
-    "notin_op": (_in_impl, operators.in_op),
+    "nulls_first_op": (_scalar, UnaryExpression._create_nulls_first),
+    "nulls_last_op": (_scalar, UnaryExpression._create_nulls_last),
+    "in_op": (_in_impl, operators.not_in_op),
+    "not_in_op": (_in_impl, operators.in_op),
     "is_": (_boolean_compare, operators.is_),
-    "isnot": (_boolean_compare, operators.isnot),
+    "is_not": (_boolean_compare, operators.is_not),
     "collate": (_collate_impl,),
     "match_op": (_match_impl,),
-    "notmatch_op": (_match_impl,),
+    "not_match_op": (_match_impl,),
     "distinct_op": (_distinct_impl,),
     "between_op": (_between_impl,),
-    "notbetween_op": (_between_impl,),
+    "not_between_op": (_between_impl,),
     "neg": (_neg_impl,),
     "getitem": (_getitem_impl,),
     "lshift": (_unsupported_impl,),
     "rshift": (_unsupported_impl,),
     "contains": (_unsupported_impl,),
+    "regexp_match_op": (_regexp_match_impl,),
+    "not_regexp_match_op": (_regexp_match_impl,),
+    "regexp_replace_op": (_regexp_replace_impl,),
 }

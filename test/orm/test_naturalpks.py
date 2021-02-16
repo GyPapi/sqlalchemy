@@ -12,10 +12,8 @@ from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import TypeDecorator
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
 from sqlalchemy.orm.session import make_transient
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
@@ -23,13 +21,17 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import ne_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
 
 
 def _backend_specific_fk_args():
-    if testing.requires.deferrable_fks.enabled:
+    if (
+        testing.requires.deferrable_fks.enabled
+        and testing.requires.non_updating_cascade.enabled
+    ):
         fk_args = dict(deferrable=True, initially="deferred")
     elif not testing.requires.on_update_cascade.enabled:
         fk_args = dict()
@@ -108,7 +110,7 @@ class NaturalPKTest(fixtures.MappedTest):
 
         mapper(User, users)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
 
         sess.add(u1)
@@ -134,14 +136,16 @@ class NaturalPKTest(fixtures.MappedTest):
 
         mapper(User, users)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
 
         sess.add(u1)
         sess.flush()
         assert sess.query(User).get("jack") is u1
 
-        users.update(values={User.username: "jack"}).execute(username="ed")
+        sess.execute(
+            users.update(values={User.username: "jack"}), dict(username="ed")
+        )
 
         # expire/refresh works off of primary key.  the PK is gone
         # in this case so there's no way to look it up.  criterion-
@@ -159,7 +163,7 @@ class NaturalPKTest(fixtures.MappedTest):
 
         mapper(User, users)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
 
         sess.add(u1)
@@ -178,7 +182,7 @@ class NaturalPKTest(fixtures.MappedTest):
 
         mapper(User, users)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
 
         sess.add(u1)
@@ -194,7 +198,7 @@ class NaturalPKTest(fixtures.MappedTest):
         User, users = self.classes.User, self.tables.users
 
         mapper(User, users)
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
 
         sess.add(u1)
@@ -233,7 +237,7 @@ class NaturalPKTest(fixtures.MappedTest):
         )
         mapper(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
         u1.addresses.append(Address(email="jack1"))
         u1.addresses.append(Address(email="jack2"))
@@ -266,10 +270,13 @@ class NaturalPKTest(fixtures.MappedTest):
             # test passive_updates=True; update user
             self.assert_sql_count(testing.db, go, 1)
         sess.expunge_all()
-        assert User(
-            username="jack",
-            addresses=[Address(username="jack"), Address(username="jack")],
-        ) == sess.query(User).get("jack")
+        assert (
+            User(
+                username="jack",
+                addresses=[Address(username="jack"), Address(username="jack")],
+            )
+            == sess.query(User).get("jack")
+        )
 
         u1 = sess.query(User).get("jack")
         u1.addresses = []
@@ -308,9 +315,15 @@ class NaturalPKTest(fixtures.MappedTest):
         )
 
         with testing.db.begin() as conn:
-            conn.execute(users.insert(), username="jack", fullname="jack")
-            conn.execute(addresses.insert(), email="jack1", username="jack")
-            conn.execute(addresses.insert(), email="jack2", username="jack")
+            conn.execute(
+                users.insert(), dict(username="jack", fullname="jack")
+            )
+            conn.execute(
+                addresses.insert(), dict(email="jack1", username="jack")
+            )
+            conn.execute(
+                addresses.insert(), dict(email="jack2", username="jack")
+            )
 
         mapper(User, users)
         mapper(
@@ -319,7 +332,7 @@ class NaturalPKTest(fixtures.MappedTest):
             properties={"user": relationship(User, passive_updates=False)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = sess.query(User).first()
         a1, a2 = sess.query(Address).all()
         u1.username = "ed"
@@ -348,7 +361,7 @@ class NaturalPKTest(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         a1 = Address(email="jack1")
         a2 = Address(email="jack2")
         a3 = Address(email="fred")
@@ -427,7 +440,7 @@ class NaturalPKTest(fixtures.MappedTest):
         )
         mapper(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
         sess.add(u1)
         sess.flush()
@@ -482,7 +495,7 @@ class NaturalPKTest(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session(autoflush=False)
         a1 = Address(email="jack1")
         a2 = Address(email="jack2")
 
@@ -535,7 +548,10 @@ class NaturalPKTest(fixtures.MappedTest):
     def test_manytomany_passive(self):
         self._test_manytomany(True)
 
-    @testing.requires.non_updating_cascade
+    @testing.fails_if(
+        testing.requires.on_update_cascade
+        + testing.requires.sane_multi_rowcount
+    )
     def test_manytomany_nonpassive(self):
         self._test_manytomany(False)
 
@@ -562,7 +578,7 @@ class NaturalPKTest(fixtures.MappedTest):
         )
         mapper(Item, items)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack")
         u2 = User(username="fred")
         i1 = Item(itemname="item1")
@@ -631,7 +647,7 @@ class NaturalPKTest(fixtures.MappedTest):
             },
         )
 
-        s = Session()
+        s = fixture_session()
         a1 = Address(email="jack1")
         u1 = User(username="jack", fullname="jack")
 
@@ -748,7 +764,7 @@ class TransientExceptionTesst(_fixtures.FixtureTest):
         mapper(User, users)
         mapper(Address, addresses, properties={"user": relationship(User)})
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(id=5, name="u1")
         ad1 = Address(email_address="e1", user=u1)
         sess.add_all([u1, ad1])
@@ -801,7 +817,7 @@ class ReversePKsTest(fixtures.MappedTest):
 
         mapper(User, user)
 
-        session = sa.orm.sessionmaker()()
+        session = fixture_session()
 
         a_published = User(1, PUBLISHED, "a")
         session.add(a_published)
@@ -841,7 +857,7 @@ class ReversePKsTest(fixtures.MappedTest):
 
         mapper(User, user)
 
-        session = sa.orm.sessionmaker()()
+        session = fixture_session()
 
         a_published = User(1, PUBLISHED, "a")
         session.add(a_published)
@@ -868,7 +884,7 @@ class ReversePKsTest(fixtures.MappedTest):
 class SelfReferentialTest(fixtures.MappedTest):
     # mssql, mysql don't allow
     # ON UPDATE on self-referential keys
-    __unsupported_on__ = ("mssql", "mysql")
+    __unsupported_on__ = ("mssql", "mysql", "mariadb")
 
     __requires__ = ("on_update_or_deferrable_fks",)
     __backend__ = True
@@ -908,7 +924,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             },
         )
 
-        sess = Session()
+        sess = fixture_session()
         n1 = Node(name="n1")
         sess.add(n1)
         n2 = Node(name="n11", parentnode=n1)
@@ -946,7 +962,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             },
         )
 
-        sess = Session()
+        sess = fixture_session()
         n1 = Node(name="n1")
         n1.children.append(Node(name="n11"))
         n1.children.append(Node(name="n12"))
@@ -987,7 +1003,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             },
         )
 
-        sess = Session()
+        sess = fixture_session()
         n1 = Node(name="n1")
         n11 = Node(name="n11", parentnode=n1)
         n12 = Node(name="n12", parentnode=n1)
@@ -1074,7 +1090,7 @@ class NonPKCascadeTest(fixtures.MappedTest):
         )
         mapper(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack", fullname="jack")
         u1.addresses.append(Address(email="jack1"))
         u1.addresses.append(Address(email="jack2"))
@@ -1083,7 +1099,7 @@ class NonPKCascadeTest(fixtures.MappedTest):
         a1 = u1.addresses[0]
 
         eq_(
-            sa.select([addresses.c.username]).execute().fetchall(),
+            sess.execute(sa.select(addresses.c.username)).fetchall(),
             [("jack",), ("jack",)],
         )
 
@@ -1093,7 +1109,7 @@ class NonPKCascadeTest(fixtures.MappedTest):
         sess.flush()
         assert u1.addresses[0].username == "ed"
         eq_(
-            sa.select([addresses.c.username]).execute().fetchall(),
+            sess.execute(sa.select(addresses.c.username)).fetchall(),
             [("ed",), ("ed",)],
         )
 
@@ -1117,10 +1133,13 @@ class NonPKCascadeTest(fixtures.MappedTest):
             # test passive_updates=True; update user
             self.assert_sql_count(testing.db, go, 1)
         sess.expunge_all()
-        assert User(
-            username="jack",
-            addresses=[Address(username="jack"), Address(username="jack")],
-        ) == sess.query(User).get(u1.id)
+        assert (
+            User(
+                username="jack",
+                addresses=[Address(username="jack"), Address(username="jack")],
+            )
+            == sess.query(User).get(u1.id)
+        )
         sess.expunge_all()
 
         u1 = sess.query(User).get(u1.id)
@@ -1132,7 +1151,7 @@ class NonPKCascadeTest(fixtures.MappedTest):
         eq_(a1.username, None)
 
         eq_(
-            sa.select([addresses.c.username]).execute().fetchall(),
+            sess.execute(sa.select(addresses.c.username)).fetchall(),
             [(None,), (None,)],
         )
 
@@ -1219,7 +1238,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         )
         mapper(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session()
         a1 = Address(username="ed", email="ed@host1")
         u1 = User(username="ed", addresses=[a1])
         u2 = User(username="jack")
@@ -1260,7 +1279,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         )
         mapper(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session(autoflush=False)
         a1 = Address(username="ed", email="ed@host1")
         u1 = User(username="ed", addresses=[a1])
         u2 = User(username="jack")
@@ -1307,7 +1326,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack")
         if uselist:
             a1 = Address(user=[u1], email="foo@bar")
@@ -1347,7 +1366,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="jack")
         u2 = User(username="ed")
         a1 = Address(user=u1, email="foo@bar")
@@ -1372,7 +1391,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             properties={"user": relationship(User, passive_updates=True)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(username="ed")
         a1 = Address(user=u1, email="ed@host1")
 
@@ -1434,7 +1453,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         )
         mapper(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session()
         a1, a2 = (
             Address(username="ed", email="ed@host1"),
             Address(username="ed", email="ed@host2"),
@@ -1445,7 +1464,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         eq_(a1.username, "ed")
         eq_(a2.username, "ed")
         eq_(
-            sa.select([addresses.c.username]).execute().fetchall(),
+            sess.execute(sa.select(addresses.c.username)).fetchall(),
             [("ed",), ("ed",)],
         )
 
@@ -1456,7 +1475,7 @@ class CascadeToFKPKTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         eq_(a1.username, "jack")
         eq_(a2.username, "jack")
         eq_(
-            sa.select([addresses.c.username]).execute().fetchall(),
+            sess.execute(sa.select(addresses.c.username)).fetchall(),
             [("jack",), ("jack",)],
         )
 
@@ -1614,7 +1633,7 @@ class JoinedInheritanceTest(fixtures.MappedTest):
     def _test_pk(self, passive_updates):
         (Engineer,) = self.classes("Engineer")
         self._mapping_fixture(False, passive_updates)
-        sess = sa.orm.sessionmaker()()
+        sess = fixture_session()
 
         e1 = Engineer(name="dilbert", primary_language="java")
         sess.add(e1)
@@ -1644,7 +1663,7 @@ class JoinedInheritanceTest(fixtures.MappedTest):
 
         self._mapping_fixture(False, passive_updates)
 
-        sess = sa.orm.sessionmaker()()
+        sess = fixture_session()
 
         m1 = Manager(name="dogbert", paperwork="lots")
         e1, e2 = (
@@ -1689,7 +1708,7 @@ class JoinedInheritanceTest(fixtures.MappedTest):
 
         self._mapping_fixture(True, passive_updates)
 
-        sess = sa.orm.sessionmaker()()
+        sess = fixture_session()
 
         o1 = Owner(name="dogbert", owner_name="dog")
         sess.add(o1)
@@ -1727,7 +1746,7 @@ class JoinedInheritanceTest(fixtures.MappedTest):
         Owner, Engineer = self.classes("Owner", "Engineer")
         self._mapping_fixture(True, passive_updates)
 
-        sess = sa.orm.sessionmaker()()
+        sess = fixture_session()
 
         m1 = Owner(name="dogbert", paperwork="lots", owner_name="dog")
         e1, e2 = (
@@ -1800,7 +1819,7 @@ class UnsortablePKTest(fixtures.MappedTest):
 
     def test_updates_sorted(self):
         Data = self.classes.Data
-        s = Session()
+        s = fixture_session()
 
         s.add_all(
             [
@@ -1892,7 +1911,7 @@ class JoinedInheritancePKOnFKTest(fixtures.MappedTest):
             polymorphic_identity="engineer",
         )
 
-        sess = sa.orm.sessionmaker()()
+        sess = fixture_session()
 
         e1 = Engineer(name="dilbert", primary_language="java")
         sess.add(e1)

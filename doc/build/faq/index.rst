@@ -8,7 +8,7 @@ The Frequently Asked Questions section is a growing collection of commonly
 observed questions to well-known issues.
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
 
     connections
     metadata_schema
@@ -16,4 +16,5 @@ observed questions to well-known issues.
     ormconfiguration
     performance
     sessions
+    thirdparty
 

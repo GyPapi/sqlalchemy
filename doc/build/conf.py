@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath("."))
 # -- General configuration --------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
-needs_sphinx = "1.6.0"
+needs_sphinx = "3.5.0"
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
@@ -37,13 +37,14 @@ extensions = [
     "changelog",
     "sphinx_paramlinks",
 ]
+needs_extensions = {"zzzeeksphinx": "1.2.1"}
 
 # Add any paths that contain templates here, relative to this directory.
 # not sure why abspath() is needed here, some users
 # have reported this.
 templates_path = [os.path.abspath("templates")]
 
-nitpicky = True
+nitpicky = False
 
 # The suffix of source filenames.
 source_suffix = ".rst"
@@ -52,6 +53,7 @@ source_suffix = ".rst"
 # section names used by the changelog extension.
 changelog_sections = [
     "general",
+    "platform",
     "orm",
     "orm declarative",
     "orm querying",
@@ -59,6 +61,8 @@ changelog_sections = [
     "engine",
     "sql",
     "schema",
+    "extensions",
+    "asyncio",
     "postgresql",
     "mysql",
     "sqlite",
@@ -69,12 +73,17 @@ changelog_sections = [
 # tags to sort on inside of sections
 changelog_inner_tag_sort = [
     "feature",
-    "changed",
     "usecase",
-    "removed",
+    "change",
+    "changed",
+    "performance",
     "bug",
+    "deprecated",
+    "removed",
+    "renamed",
     "moved",
 ]
+
 
 # how to render changelog links
 changelog_render_ticket = "http://www.sqlalchemy.org/trac/ticket/%s"
@@ -86,8 +95,11 @@ changelog_render_pullreq = {
 
 changelog_render_changeset = "http://www.sqlalchemy.org/trac/changeset/%s"
 
-exclude_patterns = ["build", "**/unreleased*/*"]
+exclude_patterns = ["build", "**/unreleased*/*", "*_include.rst"]
 
+# zzzeeksphinx makes these conversions when it is rendering the
+# docstrings classes, methods, and functions within the scope of
+# Sphinx autodoc
 autodocmods_convert_modname = {
     "sqlalchemy.sql.sqltypes": "sqlalchemy.types",
     "sqlalchemy.sql.type_api": "sqlalchemy.types",
@@ -97,14 +109,72 @@ autodocmods_convert_modname = {
     "sqlalchemy.sql.dml": "sqlalchemy.sql.expression",
     "sqlalchemy.sql.ddl": "sqlalchemy.schema",
     "sqlalchemy.sql.base": "sqlalchemy.sql.expression",
+    "sqlalchemy.sql.operators": "sqlalchemy.sql.expression",
+    "sqlalchemy.event.base": "sqlalchemy.event",
     "sqlalchemy.engine.base": "sqlalchemy.engine",
+    "sqlalchemy.engine.url": "sqlalchemy.engine",
+    "sqlalchemy.engine.row": "sqlalchemy.engine",
+    "sqlalchemy.engine.cursor": "sqlalchemy.engine",
     "sqlalchemy.engine.result": "sqlalchemy.engine",
+    "sqlalchemy.ext.asyncio.result": "sqlalchemy.ext.asyncio",
+    "sqlalchemy.ext.asyncio.engine": "sqlalchemy.ext.asyncio",
+    "sqlalchemy.ext.asyncio.session": "sqlalchemy.ext.asyncio",
+    "sqlalchemy.util._collections": "sqlalchemy.util",
+    "sqlalchemy.orm.relationships": "sqlalchemy.orm",
+    "sqlalchemy.orm.interfaces": "sqlalchemy.orm",
+    "sqlalchemy.orm.query": "sqlalchemy.orm",
+    "sqlalchemy.orm.util": "sqlalchemy.orm",
 }
 
 autodocmods_convert_modname_w_class = {
     ("sqlalchemy.engine.interfaces", "Connectable"): "sqlalchemy.engine",
     ("sqlalchemy.sql.base", "DialectKWArgs"): "sqlalchemy.sql.base",
 }
+
+# on the referencing side, a newer zzzeeksphinx extension
+# applies shorthand symbols to references so that we can have short
+# names that are still using absolute references.
+zzzeeksphinx_module_prefixes = {
+    "_sa": "sqlalchemy",
+    "_engine": "sqlalchemy.engine",
+    "_url": "sqlalchemy.engine",
+    "_result": "sqlalchemy.engine",
+    "_row": "sqlalchemy.engine",
+    "_schema": "sqlalchemy.schema",
+    "_types": "sqlalchemy.types",
+    "_asyncio": "sqlalchemy.ext.asyncio",
+    "_expression": "sqlalchemy.sql.expression",
+    "_sql": "sqlalchemy.sql.expression",
+    "_dml": "sqlalchemy.sql.expression",
+    "_ddl": "sqlalchemy.schema",
+    "_functions": "sqlalchemy.sql.functions",
+    "_pool": "sqlalchemy.pool",
+    "_event": "sqlalchemy.event",
+    "_events": "sqlalchemy.events",
+    "_exc": "sqlalchemy.exc",
+    "_reflection": "sqlalchemy.engine.reflection",
+    "_orm": "sqlalchemy.orm",
+    "_query": "sqlalchemy.orm",
+    "_ormevent": "sqlalchemy.orm.event",
+    "_ormexc": "sqlalchemy.orm.exc",
+    "_baked": "sqlalchemy.ext.baked",
+    "_horizontal": "sqlalchemy.ext.horizontal_shard",
+    "_associationproxy": "sqlalchemy.ext.associationproxy",
+    "_automap": "sqlalchemy.ext.automap",
+    "_hybrid": "sqlalchemy.ext.hybrid",
+    "_compilerext": "sqlalchemy.ext.compiler",
+    "_mutable": "sqlalchemy.ext.mutable",
+    "_declarative": "sqlalchemy.ext.declarative",
+    "_future": "sqlalchemy.future",
+    "_futureorm": "sqlalchemy.future.orm",
+    "_postgresql": "sqlalchemy.dialects.postgresql",
+    "_mysql": "sqlalchemy.dialects.mysql",
+    "_mssql": "sqlalchemy.dialects.mssql",
+    "_oracle": "sqlalchemy.dialects.oracle",
+    "_sqlite": "sqlalchemy.dialects.sqlite",
+    "_util": "sqlalchemy.util",
+}
+
 
 # The encoding of source files.
 # source_encoding = 'utf-8-sig'
@@ -114,7 +184,7 @@ master_doc = "contents"
 
 # General information about the project.
 project = u"SQLAlchemy"
-copyright = u"2007-2020, the SQLAlchemy authors and contributors"  # noqa
+copyright = u"2007-2021, the SQLAlchemy authors and contributors"  # noqa
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -123,9 +193,9 @@ copyright = u"2007-2020, the SQLAlchemy authors and contributors"  # noqa
 # The short X.Y version.
 version = "1.4"
 # The full version, including alpha/beta/rc tags.
-release = "1.4.0b1"
+release = "1.4.0b3"
 
-release_date = None
+release_date = "February 15, 2021"
 
 site_base = os.environ.get("RTD_SITE_BASE", "http://www.sqlalchemy.org")
 site_adapter_template = "docs_adapter.mako"

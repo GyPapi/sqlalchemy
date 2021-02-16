@@ -19,7 +19,6 @@ from sqlalchemy.orm import class_mapper
 from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import column_property
 from sqlalchemy.orm import composite
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import deferred
 from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import joinedload
@@ -28,20 +27,21 @@ from sqlalchemy.orm import object_mapper
 from sqlalchemy.orm import polymorphic_union
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import synonym
 from sqlalchemy.orm.util import instance_str
+from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
-from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.assertsql import Conditional
 from sqlalchemy.testing.assertsql import Or
 from sqlalchemy.testing.assertsql import RegexSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -103,7 +103,7 @@ class O2MTest(fixtures.MappedTest):
             properties={"parent_foo": relationship(Foo)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         b1 = Blub("blub #1")
         b2 = Blub("blub #2")
         f = Foo("foo #1")
@@ -131,6 +131,50 @@ class O2MTest(fixtures.MappedTest):
         eq_(result[1].parent_foo.data, "foo #1")
 
 
+class ColExpressionsTest(fixtures.DeclarativeMappedTest):
+    __backend__ = True
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(
+                Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            type = Column(String(10))
+            __mapper_args__ = {
+                "polymorphic_on": type,
+                "polymorphic_identity": "a",
+            }
+
+        class B(A):
+            __tablename__ = "b"
+            id = Column(ForeignKey("a.id"), primary_key=True)
+            data = Column(Integer)
+            __mapper_args__ = {"polymorphic_identity": "b"}
+
+    @classmethod
+    def insert_data(cls, connection):
+        A, B = cls.classes("A", "B")
+        s = Session(connection)
+
+        s.add_all([B(data=5), B(data=7)])
+        s.commit()
+
+    def test_group_by(self):
+        B = self.classes.B
+        s = fixture_session()
+
+        rows = (
+            s.query(B.id.expressions[0], B.id.expressions[1], func.sum(B.data))
+            .group_by(*B.id.expressions)
+            .all()
+        )
+        eq_(rows, [(1, 1, 5), (2, 2, 7)])
+
+
 class PolyExpressionEagerLoad(fixtures.DeclarativeMappedTest):
     run_setup_mappers = "once"
     __dialect__ = "default"
@@ -149,7 +193,7 @@ class PolyExpressionEagerLoad(fixtures.DeclarativeMappedTest):
             child_id = Column(Integer, ForeignKey("a.id"))
             child = relationship("A")
 
-            p_a = case([(discriminator == "a", "a")], else_="b")
+            p_a = case((discriminator == "a", "a"), else_="b")
 
             __mapper_args__ = {
                 "polymorphic_identity": "a",
@@ -160,10 +204,10 @@ class PolyExpressionEagerLoad(fixtures.DeclarativeMappedTest):
             __mapper_args__ = {"polymorphic_identity": "b"}
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A = cls.classes.A
 
-        session = Session(testing.db)
+        session = Session(connection)
         session.add_all(
             [
                 A(id=1, discriminator="a"),
@@ -177,7 +221,7 @@ class PolyExpressionEagerLoad(fixtures.DeclarativeMappedTest):
         A = self.classes.A
         B = self.classes.B
 
-        session = Session(testing.db)
+        session = fixture_session()
         result = (
             session.query(A)
             .filter_by(child_id=None)
@@ -350,10 +394,10 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
     def test_polymorphic_on_not_present_col(self):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent = self.classes.Parent
-        t1t2_join = select([t1.c.x], from_obj=[t1.join(t2)]).alias()
+        t1t2_join = select(t1.c.x).select_from(t1.join(t2)).alias()
 
         def go():
-            t1t2_join_2 = select([t1.c.q], from_obj=[t1.join(t2)]).alias()
+            t1t2_join_2 = select(t1.c.q).select_from(t1.join(t2)).alias()
             mapper(
                 Parent,
                 t2,
@@ -372,7 +416,7 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
     def test_polymorphic_on_only_in_with_poly(self):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent = self.classes.Parent
-        t1t2_join = select([t1.c.x], from_obj=[t1.join(t2)]).alias()
+        t1t2_join = select(t1.c.x).select_from(t1.join(t2)).alias()
         # if its in the with_polymorphic, then its OK
         mapper(
             Parent,
@@ -386,11 +430,11 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent = self.classes.Parent
 
-        t1t2_join = select([t1.c.x], from_obj=[t1.join(t2)]).alias()
+        t1t2_join = select(t1.c.x).select_from(t1.join(t2)).alias()
 
         # if with_polymorphic, but its not present, not OK
         def go():
-            t1t2_join_2 = select([t1.c.q], from_obj=[t1.join(t2)]).alias()
+            t1t2_join_2 = select(t1.c.q).select_from(t1.join(t2)).alias()
             mapper(
                 Parent,
                 t2,
@@ -410,7 +454,7 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
     def test_polymorphic_on_expr_explicit_map(self):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent, Child = self.classes.Parent, self.classes.Child
-        expr = case([(t1.c.x == "p", "parent"), (t1.c.x == "c", "child")])
+        expr = case((t1.c.x == "p", "parent"), (t1.c.x == "c", "child"))
         mapper(
             Parent,
             t1,
@@ -425,7 +469,7 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
     def test_polymorphic_on_expr_implicit_map_no_label_joined(self):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent, Child = self.classes.Parent, self.classes.Child
-        expr = case([(t1.c.x == "p", "parent"), (t1.c.x == "c", "child")])
+        expr = case((t1.c.x == "p", "parent"), (t1.c.x == "c", "child"))
         mapper(Parent, t1, polymorphic_identity="parent", polymorphic_on=expr)
         mapper(Child, t2, inherits=Parent, polymorphic_identity="child")
 
@@ -434,9 +478,9 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
     def test_polymorphic_on_expr_implicit_map_w_label_joined(self):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent, Child = self.classes.Parent, self.classes.Child
-        expr = case(
-            [(t1.c.x == "p", "parent"), (t1.c.x == "c", "child")]
-        ).label(None)
+        expr = case((t1.c.x == "p", "parent"), (t1.c.x == "c", "child")).label(
+            None
+        )
         mapper(Parent, t1, polymorphic_identity="parent", polymorphic_on=expr)
         mapper(Child, t2, inherits=Parent, polymorphic_identity="child")
 
@@ -447,7 +491,7 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
         with a standalone expr"""
         t1 = self.tables.t1
         Parent, Child = self.classes.Parent, self.classes.Child
-        expr = case([(t1.c.x == "p", "parent"), (t1.c.x == "c", "child")])
+        expr = case((t1.c.x == "p", "parent"), (t1.c.x == "c", "child"))
         mapper(Parent, t1, polymorphic_identity="parent", polymorphic_on=expr)
         mapper(Child, inherits=Parent, polymorphic_identity="child")
 
@@ -458,9 +502,9 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
         with a standalone expr"""
         t1 = self.tables.t1
         Parent, Child = self.classes.Parent, self.classes.Child
-        expr = case(
-            [(t1.c.x == "p", "parent"), (t1.c.x == "c", "child")]
-        ).label(None)
+        expr = case((t1.c.x == "p", "parent"), (t1.c.x == "c", "child")).label(
+            None
+        )
         mapper(Parent, t1, polymorphic_identity="parent", polymorphic_on=expr)
         mapper(Child, inherits=Parent, polymorphic_identity="child")
 
@@ -469,7 +513,7 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
     def test_polymorphic_on_column_prop(self):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent, Child = self.classes.Parent, self.classes.Child
-        expr = case([(t1.c.x == "p", "parent"), (t1.c.x == "c", "child")])
+        expr = case((t1.c.x == "p", "parent"), (t1.c.x == "c", "child"))
         cprop = column_property(expr)
         mapper(
             Parent,
@@ -485,7 +529,7 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
     def test_polymorphic_on_column_str_prop(self):
         t2, t1 = self.tables.t2, self.tables.t1
         Parent, Child = self.classes.Parent, self.classes.Child
-        expr = case([(t1.c.x == "p", "parent"), (t1.c.x == "c", "child")])
+        expr = case((t1.c.x == "p", "parent"), (t1.c.x == "c", "child"))
         cprop = column_property(expr)
         mapper(
             Parent,
@@ -545,7 +589,7 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
                 else:
                     assert False, "Got unexpected identity %r" % ident
 
-        s = Session(testing.db)
+        s = fixture_session()
         s.add_all([Parent(q="p1"), Child(q="c1", y="c1"), Parent(q="p2")])
         s.commit()
         s.close()
@@ -602,7 +646,7 @@ class SortOnlyOnImportantFKsTest(fixtures.MappedTest):
         cls.classes.B = B
 
     def test_flush(self):
-        s = Session(testing.db)
+        s = fixture_session()
         s.add(self.classes.B())
         s.flush()
 
@@ -629,7 +673,7 @@ class FalseDiscriminatorTest(fixtures.MappedTest):
 
         mapper(Foo, t1, polymorphic_on=t1.c.type, polymorphic_identity=True)
         mapper(Bar, inherits=Foo, polymorphic_identity=False)
-        sess = create_session()
+        sess = fixture_session()
         b1 = Bar()
         sess.add(b1)
         sess.flush()
@@ -646,7 +690,7 @@ class FalseDiscriminatorTest(fixtures.MappedTest):
 
         mapper(Ding, t1, polymorphic_on=t1.c.type, polymorphic_identity=False)
         mapper(Bat, inherits=Ding, polymorphic_identity=True)
-        sess = create_session()
+        sess = fixture_session()
         d1 = Ding()
         sess.add(d1)
         sess.flush()
@@ -696,7 +740,7 @@ class PolymorphicSynonymTest(fixtures.MappedTest):
             properties={"info": synonym("_info", map_column=True)},
         )
         mapper(T2, t2, inherits=T1, polymorphic_identity="t2")
-        sess = create_session()
+        sess = fixture_session()
         at1 = T1(info="at1")
         at2 = T2(info="at2", data="t2 data")
         sess.add(at1)
@@ -787,7 +831,7 @@ class PolymorphicAttributeManagementTest(fixtures.MappedTest):
     def test_base_class(self):
         A, C, B = (self.classes.A, self.classes.C, self.classes.B)
 
-        sess = Session()
+        sess = fixture_session()
         c1 = C()
         sess.add(c1)
         sess.commit()
@@ -804,7 +848,7 @@ class PolymorphicAttributeManagementTest(fixtures.MappedTest):
         """
         D, B = self.classes.D, self.classes.B
 
-        sess = Session()
+        sess = fixture_session()
         b1 = B()
         b1.class_name = "d"
         sess.add(b1)
@@ -818,7 +862,7 @@ class PolymorphicAttributeManagementTest(fixtures.MappedTest):
         """
         C = self.classes.C
 
-        sess = Session()
+        sess = fixture_session()
         c1 = C()
         c1.class_name = "b"
         sess.add(c1)
@@ -837,7 +881,7 @@ class PolymorphicAttributeManagementTest(fixtures.MappedTest):
         """
         B = self.classes.B
 
-        sess = Session()
+        sess = fixture_session()
         b1 = B()
         b1.class_name = "c"
         sess.add(b1)
@@ -850,11 +894,10 @@ class PolymorphicAttributeManagementTest(fixtures.MappedTest):
         )
 
     def test_entirely_oob_assignment(self):
-        """test warn on an unknown polymorphic identity.
-        """
+        """test warn on an unknown polymorphic identity."""
         B = self.classes.B
 
-        sess = Session()
+        sess = fixture_session()
         b1 = B()
         b1.class_name = "xyz"
         sess.add(b1)
@@ -869,7 +912,7 @@ class PolymorphicAttributeManagementTest(fixtures.MappedTest):
     def test_not_set_on_upate(self):
         C = self.classes.C
 
-        sess = Session()
+        sess = fixture_session()
         c1 = C()
         sess.add(c1)
         sess.commit()
@@ -881,7 +924,7 @@ class PolymorphicAttributeManagementTest(fixtures.MappedTest):
     def test_validate_on_upate(self):
         C = self.classes.C
 
-        sess = Session()
+        sess = fixture_session()
         c1 = C()
         sess.add(c1)
         sess.commit()
@@ -965,7 +1008,7 @@ class CascadeTest(fixtures.MappedTest):
         )
         mapper(T4, t4)
 
-        sess = create_session()
+        sess = fixture_session()
         t1_1 = T1(data="t1")
 
         t3_1 = T3(data="t3", moredata="t3")
@@ -1051,7 +1094,7 @@ class M2OUseGetTest(fixtures.MappedTest):
 
         assert class_mapper(Related).get_property("sub").strategy.use_get
 
-        sess = create_session()
+        sess = fixture_session()
         s1 = Sub()
         r1 = Related(sub=s1)
         sess.add(r1)
@@ -1113,13 +1156,10 @@ class GetTest(fixtures.MappedTest):
         class Blub(Bar):
             pass
 
-    def test_get_polymorphic(self):
-        self._do_get_test(True)
-
-    def test_get_nonpolymorphic(self):
-        self._do_get_test(False)
-
-    def _do_get_test(self, polymorphic):
+    @testing.combinations(
+        ("polymorphic", True), ("test_get_nonpolymorphic", False), id_="ia"
+    )
+    def test_get(self, polymorphic):
         foo, Bar, Blub, blub, bar, Foo = (
             self.tables.foo,
             self.classes.Bar,
@@ -1140,7 +1180,7 @@ class GetTest(fixtures.MappedTest):
             mapper(Bar, bar, inherits=Foo)
             mapper(Blub, blub, inherits=Bar)
 
-        sess = create_session()
+        sess = fixture_session()
         f = Foo()
         b = Bar()
         bl = Blub()
@@ -1152,18 +1192,18 @@ class GetTest(fixtures.MappedTest):
         if polymorphic:
 
             def go():
-                assert sess.query(Foo).get(f.id) is f
-                assert sess.query(Foo).get(b.id) is b
-                assert sess.query(Foo).get(bl.id) is bl
-                assert sess.query(Bar).get(b.id) is b
-                assert sess.query(Bar).get(bl.id) is bl
-                assert sess.query(Blub).get(bl.id) is bl
+                assert sess.get(Foo, f.id) is f
+                assert sess.get(Foo, b.id) is b
+                assert sess.get(Foo, bl.id) is bl
+                assert sess.get(Bar, b.id) is b
+                assert sess.get(Bar, bl.id) is bl
+                assert sess.get(Blub, bl.id) is bl
 
                 # test class mismatches - item is present
                 # in the identity map but we requested a subclass
-                assert sess.query(Blub).get(f.id) is None
-                assert sess.query(Blub).get(b.id) is None
-                assert sess.query(Bar).get(f.id) is None
+                assert sess.get(Blub, f.id) is None
+                assert sess.get(Blub, b.id) is None
+                assert sess.get(Bar, f.id) is None
 
             self.assert_sql_count(testing.db, go, 0)
         else:
@@ -1172,20 +1212,20 @@ class GetTest(fixtures.MappedTest):
             # polymorphic.  the important part being that get() always
             # returns an instance of the query's type.
             def go():
-                assert sess.query(Foo).get(f.id) is f
+                assert sess.get(Foo, f.id) is f
 
-                bb = sess.query(Foo).get(b.id)
+                bb = sess.get(Foo, b.id)
                 assert isinstance(b, Foo) and bb.id == b.id
 
-                bll = sess.query(Foo).get(bl.id)
+                bll = sess.get(Foo, bl.id)
                 assert isinstance(bll, Foo) and bll.id == bl.id
 
-                assert sess.query(Bar).get(b.id) is b
+                assert sess.get(Bar, b.id) is b
 
-                bll = sess.query(Bar).get(bl.id)
+                bll = sess.get(Bar, bl.id)
                 assert isinstance(bll, Bar) and bll.id == bl.id
 
-                assert sess.query(Blub).get(bl.id) is bl
+                assert sess.get(Blub, bl.id) is bl
 
             self.assert_sql_count(testing.db, go, 3)
 
@@ -1196,8 +1236,7 @@ class EagerLazyTest(fixtures.MappedTest):
 
     @classmethod
     def define_tables(cls, metadata):
-        global foo, bar, bar_foo
-        foo = Table(
+        Table(
             "foo",
             metadata,
             Column(
@@ -1205,22 +1244,25 @@ class EagerLazyTest(fixtures.MappedTest):
             ),
             Column("data", String(30)),
         )
-        bar = Table(
+        Table(
             "bar",
             metadata,
             Column("id", Integer, ForeignKey("foo.id"), primary_key=True),
             Column("bar_data", String(30)),
         )
 
-        bar_foo = Table(
+        Table(
             "bar_foo",
             metadata,
             Column("bar_id", Integer, ForeignKey("bar.id")),
             Column("foo_id", Integer, ForeignKey("foo.id")),
         )
 
-    def test_basic(self):
-        class Foo(object):
+    @classmethod
+    def setup_mappers(cls):
+        foo, bar, bar_foo = cls.tables("foo", "bar", "bar_foo")
+
+        class Foo(cls.Comparable):
             pass
 
         class Bar(Foo):
@@ -1229,21 +1271,30 @@ class EagerLazyTest(fixtures.MappedTest):
         foos = mapper(Foo, foo)
         bars = mapper(Bar, bar, inherits=foos)
         bars.add_property("lazy", relationship(foos, bar_foo, lazy="select"))
-        bars.add_property("eager", relationship(foos, bar_foo, lazy="joined"))
+        bars.add_property(
+            "eager", relationship(foos, bar_foo, lazy="joined", viewonly=True)
+        )
 
-        foo.insert().execute(data="foo1")
-        bar.insert().execute(id=1, data="bar1")
+    @classmethod
+    def insert_data(cls, connection):
+        foo, bar, bar_foo = cls.tables("foo", "bar", "bar_foo")
 
-        foo.insert().execute(data="foo2")
-        bar.insert().execute(id=2, data="bar2")
+        connection.execute(foo.insert(), dict(data="foo1"))
+        connection.execute(bar.insert(), dict(id=1, data="bar1"))
 
-        foo.insert().execute(data="foo3")  # 3
-        foo.insert().execute(data="foo4")  # 4
+        connection.execute(foo.insert(), dict(data="foo2"))
+        connection.execute(bar.insert(), dict(id=2, data="bar2"))
 
-        bar_foo.insert().execute(bar_id=1, foo_id=3)
-        bar_foo.insert().execute(bar_id=2, foo_id=4)
+        connection.execute(foo.insert(), dict(data="foo3"))  # 3
+        connection.execute(foo.insert(), dict(data="foo4"))  # 4
 
-        sess = create_session()
+        connection.execute(bar_foo.insert(), dict(bar_id=1, foo_id=3))
+        connection.execute(bar_foo.insert(), dict(bar_id=2, foo_id=4))
+
+    def test_basic(self):
+        Bar = self.classes.Bar
+
+        sess = fixture_session()
         q = sess.query(Bar)
         self.assert_(len(q.first().lazy) == 1)
         self.assert_(len(q.first().eager) == 1)
@@ -1298,7 +1349,7 @@ class EagerTargetingTest(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
 
         b1 = B(id=1, name="b1", b_data="i")
         sess.add(b1)
@@ -1311,6 +1362,7 @@ class EagerTargetingTest(fixtures.MappedTest):
         bid = b1.id
 
         sess.expunge_all()
+
         node = sess.query(B).filter(B.id == bid).all()[0]
         eq_(node, B(id=1, name="b1", b_data="i"))
         eq_(node.children[0], B(id=2, name="b2", b_data="l"))
@@ -1401,7 +1453,7 @@ class FlushTest(fixtures.MappedTest):
             },
         )
         mapper(Admin, admins, inherits=user_mapper)
-        sess = create_session()
+        sess = fixture_session()
         adminrole = Role()
         sess.add(adminrole)
         sess.flush()
@@ -1416,7 +1468,7 @@ class FlushTest(fixtures.MappedTest):
         sess.add(a)
         sess.flush()
 
-        eq_(select([func.count("*")]).select_from(user_roles).scalar(), 1)
+        eq_(sess.scalar(select(func.count("*")).select_from(user_roles)), 1)
 
     def test_two(self):
         admins, users, roles, user_roles = (
@@ -1454,7 +1506,7 @@ class FlushTest(fixtures.MappedTest):
         # create roles
         adminrole = Role("admin")
 
-        sess = create_session()
+        sess = fixture_session()
         sess.add(adminrole)
         sess.flush()
 
@@ -1466,7 +1518,7 @@ class FlushTest(fixtures.MappedTest):
 
         a.password = "sadmin"
         sess.flush()
-        eq_(select([func.count("*")]).select_from(user_roles).scalar(), 1)
+        eq_(sess.scalar(select(func.count("*")).select_from(user_roles)), 1)
 
 
 class PassiveDeletesTest(fixtures.MappedTest):
@@ -1528,7 +1580,7 @@ class PassiveDeletesTest(fixtures.MappedTest):
         A, B, C = self.classes("A", "B", "C")
         self._fixture()
 
-        s = Session()
+        s = fixture_session()
         a1, b1, c1 = A(id=1), B(id=2), C(cid=1, id=3)
         s.add_all([a1, b1, c1])
         s.commit()
@@ -1552,7 +1604,7 @@ class PassiveDeletesTest(fixtures.MappedTest):
         A, B, C = self.classes("A", "B", "C")
         self._fixture(c_p=True)
 
-        s = Session()
+        s = fixture_session()
         a1, b1, c1 = A(id=1), B(id=2), C(cid=1, id=3)
         s.add_all([a1, b1, c1])
         s.commit()
@@ -1594,7 +1646,7 @@ class PassiveDeletesTest(fixtures.MappedTest):
         A, B, C = self.classes("A", "B", "C")
         self._fixture(b_p=True)
 
-        s = Session()
+        s = fixture_session()
         a1, b1, c1 = A(id=1), B(id=2), C(cid=1, id=3)
         s.add_all([a1, b1, c1])
         s.commit()
@@ -1632,7 +1684,7 @@ class PassiveDeletesTest(fixtures.MappedTest):
         A, B, C = self.classes("A", "B", "C")
         self._fixture(a_p=True)
 
-        s = Session()
+        s = fixture_session()
         a1, b1, c1 = A(id=1), B(id=2), C(cid=1, id=3)
         s.add_all([a1, b1, c1])
         s.commit()
@@ -1714,7 +1766,7 @@ class OptimizedGetOnDeferredTest(fixtures.MappedTest):
 
     def test_column_property(self):
         A, B = self.classes("A", "B")
-        sess = Session()
+        sess = fixture_session()
         b1 = B(data="x")
         sess.add(b1)
         sess.flush()
@@ -1723,7 +1775,7 @@ class OptimizedGetOnDeferredTest(fixtures.MappedTest):
 
     def test_expired_column(self):
         A, B = self.classes("A", "B")
-        sess = Session()
+        sess = fixture_session()
         b1 = B(data="x")
         sess.add(b1)
         sess.flush()
@@ -1777,15 +1829,25 @@ class JoinedNoFKSortingTest(fixtures.MappedTest):
 
     def test_ordering(self):
         B, C = self.classes.B, self.classes.C
-        sess = Session()
+        sess = fixture_session()
         sess.add_all([B(), C(), B(), C()])
         self.assert_sql_execution(
             testing.db,
             sess.flush,
-            CompiledSQL("INSERT INTO a () VALUES ()", {}),
-            CompiledSQL("INSERT INTO a () VALUES ()", {}),
-            CompiledSQL("INSERT INTO a () VALUES ()", {}),
-            CompiledSQL("INSERT INTO a () VALUES ()", {}),
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO a (id) VALUES (DEFAULT)", [{}, {}, {}, {}]
+                    ),
+                ],
+                [
+                    CompiledSQL("INSERT INTO a () VALUES ()", {}),
+                    CompiledSQL("INSERT INTO a () VALUES ()", {}),
+                    CompiledSQL("INSERT INTO a () VALUES ()", {}),
+                    CompiledSQL("INSERT INTO a () VALUES ()", {}),
+                ],
+            ),
             AllOf(
                 CompiledSQL(
                     "INSERT INTO b (id) VALUES (:id)", [{"id": 1}, {"id": 3}]
@@ -1827,7 +1889,6 @@ class VersioningTest(fixtures.MappedTest):
 
     @testing.emits_warning(r".*updated rowcount")
     @testing.requires.sane_rowcount_w_returning
-    @engines.close_open_connections
     def test_save_update(self):
         subtable, base, stuff = (
             self.tables.subtable,
@@ -1855,33 +1916,37 @@ class VersioningTest(fixtures.MappedTest):
         )
         mapper(Sub, subtable, inherits=Base, polymorphic_identity=2)
 
-        sess = create_session()
+        sess = fixture_session(autoflush=False)
 
         b1 = Base(value="b1")
         s1 = Sub(value="sub1", subdata="some subdata")
         sess.add(b1)
         sess.add(s1)
 
-        sess.flush()
+        sess.commit()
 
-        sess2 = create_session()
-        s2 = sess2.query(Base).get(s1.id)
+        sess2 = fixture_session(autoflush=False)
+        s2 = sess2.get(Base, s1.id)
         s2.subdata = "sess2 subdata"
 
         s1.subdata = "sess1 subdata"
 
-        sess.flush()
+        sess.commit()
 
         assert_raises(
             orm_exc.StaleDataError,
-            sess2.query(Base).with_for_update(read=True).get,
+            sess2.get,
+            Base,
             s1.id,
+            with_for_update=dict(read=True),
         )
 
         if not testing.db.dialect.supports_sane_rowcount:
             sess2.flush()
         else:
             assert_raises(orm_exc.StaleDataError, sess2.flush)
+
+        sess2.rollback()
 
         sess2.refresh(s2)
         if testing.db.dialect.supports_sane_rowcount:
@@ -1909,7 +1974,7 @@ class VersioningTest(fixtures.MappedTest):
         )
         mapper(Sub, subtable, inherits=Base, polymorphic_identity=2)
 
-        sess = create_session()
+        sess = fixture_session(autoflush=False, expire_on_commit=False)
 
         b1 = Base(value="b1")
         s1 = Sub(value="sub1", subdata="some subdata")
@@ -1918,21 +1983,21 @@ class VersioningTest(fixtures.MappedTest):
         sess.add(s1)
         sess.add(s2)
 
-        sess.flush()
+        sess.commit()
 
-        sess2 = create_session()
-        s3 = sess2.query(Base).get(s1.id)
+        sess2 = fixture_session(autoflush=False, expire_on_commit=False)
+        s3 = sess2.get(Base, s1.id)
         sess2.delete(s3)
-        sess2.flush()
+        sess2.commit()
 
         s2.subdata = "some new subdata"
-        sess.flush()
+        sess.commit()
 
         s1.subdata = "some new subdata"
         if testing.db.dialect.supports_sane_rowcount:
-            assert_raises(orm_exc.StaleDataError, sess.flush)
+            assert_raises(orm_exc.StaleDataError, sess.commit)
         else:
-            sess.flush()
+            sess.commit()
 
 
 class DistinctPKTest(fixtures.MappedTest):
@@ -1973,14 +2038,18 @@ class DistinctPKTest(fixtures.MappedTest):
             pass
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         person_insert = person_table.insert()
-        person_insert.execute(id=1, name="alice")
-        person_insert.execute(id=2, name="bob")
+        connection.execute(person_insert, dict(id=1, name="alice"))
+        connection.execute(person_insert, dict(id=2, name="bob"))
 
         employee_insert = employee_table.insert()
-        employee_insert.execute(id=2, salary=250, person_id=1)  # alice
-        employee_insert.execute(id=3, salary=200, person_id=2)  # bob
+        connection.execute(
+            employee_insert, dict(id=2, salary=250, person_id=1)
+        )  # alice
+        connection.execute(
+            employee_insert, dict(id=3, salary=200, person_id=2)
+        )  # bob
 
     def test_implicit(self):
         person_mapper = mapper(Person, person_table)
@@ -2028,17 +2097,16 @@ class DistinctPKTest(fixtures.MappedTest):
         self._do_test(False)
 
     def _do_test(self, composite):
-        session = create_session()
-        query = session.query(Employee)
+        session = fixture_session()
 
         if composite:
-            alice1 = query.get([1, 2])
-            bob = query.get([2, 3])
-            alice2 = query.get([1, 2])
+            alice1 = session.get(Employee, [1, 2])
+            bob = session.get(Employee, [2, 3])
+            alice2 = session.get(Employee, [1, 2])
         else:
-            alice1 = query.get(1)
-            bob = query.get(2)
-            alice2 = query.get(1)
+            alice1 = session.get(Employee, 1)
+            bob = session.get(Employee, 2)
+            alice2 = session.get(Employee, 1)
 
             assert alice1.name == alice2.name == "alice"
             assert bob.name == "bob"
@@ -2076,22 +2144,23 @@ class SyncCompileTest(fixtures.MappedTest):
             Column("data3", String(128)),
         )
 
-    def test_joins(self):
-        for j1 in (
-            None,
-            _b_table.c.a_id == _a_table.c.id,
-            _a_table.c.id == _b_table.c.a_id,
-        ):
-            for j2 in (
-                None,
-                _b_table.c.a_id == _c_table.c.b_a_id,
-                _c_table.c.b_a_id == _b_table.c.a_id,
-            ):
-                self._do_test(j1, j2)
-                for t in reversed(_a_table.metadata.sorted_tables):
-                    t.delete().execute().close()
+    @testing.combinations(
+        lambda _a_table, _b_table: None,
+        lambda _a_table, _b_table: _b_table.c.a_id == _a_table.c.id,
+        lambda _a_table, _b_table: _a_table.c.id == _b_table.c.a_id,
+        argnames="j1",
+    )
+    @testing.combinations(
+        lambda _b_table, _c_table: None,
+        lambda _b_table, _c_table: _b_table.c.a_id == _c_table.c.b_a_id,
+        lambda _b_table, _c_table: _c_table.c.b_a_id == _b_table.c.a_id,
+        argnames="j2",
+    )
+    def test_joins(self, j1, j2):
+        _a_table, _b_table, _c_table = self.tables("a", "b", "c")
+        j1 = testing.resolve_lambda(j1, **locals())
+        j2 = testing.resolve_lambda(j2, **locals())
 
-    def _do_test(self, j1, j2):
         class A(object):
             def __init__(self, **kwargs):
                 for key, value in list(kwargs.items()):
@@ -2107,7 +2176,7 @@ class SyncCompileTest(fixtures.MappedTest):
         mapper(B, _b_table, inherits=A, inherit_condition=j1)
         mapper(C, _c_table, inherits=B, inherit_condition=j2)
 
-        session = create_session()
+        session = fixture_session()
 
         a = A(data1="a1")
         session.add(a)
@@ -2213,10 +2282,10 @@ class OverrideColKeyTest(fixtures.MappedTest):
 
         s1 = Sub()
         s1.id = 10
-        sess = create_session()
+        sess = fixture_session()
         sess.add(s1)
         sess.flush()
-        assert sess.query(Sub).get(10) is s1
+        assert sess.get(Sub, 10) is s1
 
     def test_override_onlyinparent(self):
         class Base(object):
@@ -2241,12 +2310,12 @@ class OverrideColKeyTest(fixtures.MappedTest):
         s2 = Sub()
         s2.base_id = 15
 
-        sess = create_session()
+        sess = fixture_session()
         sess.add_all([s1, s2])
         sess.flush()
 
         # s1 gets '10'
-        assert sess.query(Sub).get(10) is s1
+        assert sess.get(Sub, 10) is s1
 
         # s2 gets a new id, base_id is overwritten by the ultimate
         # PK col
@@ -2313,7 +2382,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         mapper(Sub, subtable, inherits=Base)
 
         s1 = Sub()
-        sess = create_session()
+        sess = fixture_session()
         sess.add(s1)
         sess.flush()
         assert sess.query(Sub).one().data == "im the data"
@@ -2338,7 +2407,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         mapper(Sub, subtable, inherits=Base)
 
         s1 = Sub()
-        sess = create_session()
+        sess = fixture_session()
         sess.add(s1)
         sess.flush()
         assert sess.query(Sub).one().data == "im the data"
@@ -2355,7 +2424,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         mapper(Base, base)
         mapper(Sub, subtable, inherits=Base)
 
-        sess = create_session()
+        sess = fixture_session()
         b1 = Base()
         assert b1.subdata == "this is base"
         s1 = Sub()
@@ -2366,8 +2435,8 @@ class OverrideColKeyTest(fixtures.MappedTest):
         sess.flush()
         sess.expunge_all()
 
-        assert sess.query(Base).get(b1.base_id).subdata == "this is base"
-        assert sess.query(Sub).get(s1.base_id).subdata == "this is sub"
+        assert sess.get(Base, b1.base_id).subdata == "this is base"
+        assert sess.get(Sub, s1.base_id).subdata == "this is sub"
 
     def test_base_descriptors_over_base_cols(self):
         class Base(object):
@@ -2381,7 +2450,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         mapper(Base, base)
         mapper(Sub, subtable, inherits=Base)
 
-        sess = create_session()
+        sess = fixture_session()
         b1 = Base()
         assert b1.data == "this is base"
         s1 = Sub()
@@ -2391,8 +2460,8 @@ class OverrideColKeyTest(fixtures.MappedTest):
         sess.flush()
         sess.expunge_all()
 
-        assert sess.query(Base).get(b1.base_id).data == "this is base"
-        assert sess.query(Sub).get(s1.base_id).data == "this is base"
+        assert sess.get(Base, b1.base_id).data == "this is base"
+        assert sess.get(Sub, s1.base_id).data == "this is base"
 
 
 class OptimizedLoadTest(fixtures.MappedTest):
@@ -2457,7 +2526,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
         )
         mapper(SubJoinBase, inherits=JoinBase)
 
-        sess = Session()
+        sess = fixture_session()
         sess.add(Base(data="data"))
         sess.commit()
 
@@ -2499,7 +2568,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
         # columns in order to do the lookup.
         #
         # note this test can't fail when the fix is missing unless
-        # ResultProxy._key_fallback no longer allows a non-matching column
+        # CursorResult._key_fallback no longer allows a non-matching column
         # lookup without warning or raising.
 
         base, sub = self.tables.base, self.tables.sub
@@ -2521,10 +2590,13 @@ class OptimizedLoadTest(fixtures.MappedTest):
             polymorphic_identity="sub",
             with_polymorphic=(
                 "*",
-                base.outerjoin(sub).select(use_labels=True).alias("foo"),
+                base.outerjoin(sub)
+                .select()
+                .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+                .alias("foo"),
             ),
         )
-        sess = Session()
+        sess = fixture_session()
         s1 = Sub(
             data="s1data", sub="s1sub", subcounter=1, counter=1, subcounter2=1
         )
@@ -2543,7 +2615,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
             eq_(s1.sub, "s1sub")
 
     def test_optimized_passes(self):
-        """"test that the 'optimized load' routine doesn't crash when
+        """ "test that the 'optimized load' routine doesn't crash when
         a column in the join condition is not available."""
 
         base, sub = self.tables.base, self.tables.sub
@@ -2567,7 +2639,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
             polymorphic_identity="sub",
             properties={"id": [sub.c.id, base.c.id]},
         )
-        sess = sessionmaker()()
+        sess = fixture_session()
         s1 = Sub(data="s1data", sub="s1sub")
         sess.add(s1)
         sess.commit()
@@ -2602,7 +2674,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
                 "concat": column_property(sub.c.sub + "|" + sub.c.sub)
             },
         )
-        sess = sessionmaker()()
+        sess = fixture_session()
         s1 = Sub(data="s1data", sub="s1sub")
         sess.add(s1)
         sess.commit()
@@ -2631,7 +2703,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
                 "concat": column_property(base.c.data + "|" + sub.c.sub)
             },
         )
-        sess = sessionmaker()()
+        sess = fixture_session()
         s1 = Sub(data="s1data", sub="s1sub")
         s2 = Sub(data="s2data", sub="s2sub")
         s3 = Sub(data="s3data", sub="s3sub")
@@ -2681,7 +2753,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
             polymorphic_identity="wc",
             properties={"comp": composite(Comp, with_comp.c.a, with_comp.c.b)},
         )
-        sess = sessionmaker()()
+        sess = fixture_session()
         s1 = WithComp(data="s1data", comp=Comp("ham", "cheese"))
         s2 = WithComp(data="s2data", comp=Comp("bacon", "eggs"))
         sess.add_all([s1, s2])
@@ -2706,7 +2778,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
             Base, base, polymorphic_on=base.c.type, polymorphic_identity="base"
         )
         mapper(Sub, sub, inherits=Base, polymorphic_identity="sub")
-        sess = Session()
+        sess = fixture_session()
         s1 = Sub(data="s1")
         sess.add(s1)
         self.assert_sql_execution(
@@ -2800,7 +2872,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
         )
         mapper(Sub, sub, inherits=Base, polymorphic_identity="sub")
         mapper(SubSub, subsub, inherits=Sub, polymorphic_identity="subsub")
-        sess = Session()
+        sess = fixture_session()
         s1 = SubSub(data="s1", counter=1, subcounter=2)
         sess.add(s1)
         self.assert_sql_execution(
@@ -2857,7 +2929,7 @@ class NoPKOnSubTableWarningTest(fixtures.TestBase):
         )
         return parent, child
 
-    def tearDown(self):
+    def teardown_test(self):
         clear_mappers()
 
     def test_warning_on_sub(self):
@@ -3081,7 +3153,7 @@ class PKDiscriminatorTest(fixtures.MappedTest):
 
         mapper(A, inherits=Child, polymorphic_identity=2)
 
-        s = create_session()
+        s = fixture_session()
         p = Parent("p1")
         a = A("a1")
         p.children.append(a)
@@ -3149,7 +3221,7 @@ class NoPolyIdentInMiddleTest(fixtures.MappedTest):
     def test_load_from_middle(self):
         C, B = self.classes.C, self.classes.B
 
-        s = Session()
+        s = fixture_session()
         s.add(C())
         o = s.query(B).first()
         eq_(o.type, "c")
@@ -3158,7 +3230,7 @@ class NoPolyIdentInMiddleTest(fixtures.MappedTest):
     def test_load_from_base(self):
         A, C = self.classes.A, self.classes.C
 
-        s = Session()
+        s = fixture_session()
         s.add(C())
         o = s.query(A).first()
         eq_(o.type, "c")
@@ -3179,7 +3251,7 @@ class NoPolyIdentInMiddleTest(fixtures.MappedTest):
             self.tables.base,
         )
 
-        s = Session()
+        s = fixture_session()
         s.add_all([C(), D(), E()])
         eq_(s.query(B).order_by(base.c.type).all(), [C(), D()])
 
@@ -3243,7 +3315,7 @@ class DeleteOrphanTest(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         s1 = SubClass(data="s1")
         sess.add(s1)
         assert_raises(sa_exc.DBAPIError, sess.flush)
@@ -3345,34 +3417,33 @@ class DiscriminatorOrPkNoneTest(fixtures.DeclarativeMappedTest):
             __mapper_args__ = {"polymorphic_identity": "b"}
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         Parent, A, B = cls.classes("Parent", "A", "B")
-        s = Session()
+        with Session(connection) as s:
+            p1 = Parent(id=1)
+            p2 = Parent(id=2)
+            s.add_all([p1, p2])
+            s.flush()
 
-        p1 = Parent(id=1)
-        p2 = Parent(id=2)
-        s.add_all([p1, p2])
-        s.flush()
+            s.add_all(
+                [
+                    A(id=1, parent_id=1),
+                    B(id=2, parent_id=1),
+                    A(id=3, parent_id=1),
+                    B(id=4, parent_id=1),
+                ]
+            )
+            s.flush()
 
-        s.add_all(
-            [
-                A(id=1, parent_id=1),
-                B(id=2, parent_id=1),
-                A(id=3, parent_id=1),
-                B(id=4, parent_id=1),
-            ]
-        )
-        s.flush()
-
-        s.query(A).filter(A.id.in_([3, 4])).update(
-            {A.type: None}, synchronize_session=False
-        )
-        s.commit()
+            s.query(A).filter(A.id.in_([3, 4])).update(
+                {A.type: None}, synchronize_session=False
+            )
+            s.commit()
 
     def test_pk_is_null(self):
         Parent, A = self.classes("Parent", "A")
 
-        sess = Session()
+        sess = fixture_session()
         q = (
             sess.query(Parent, A)
             .select_from(Parent)
@@ -3386,7 +3457,7 @@ class DiscriminatorOrPkNoneTest(fixtures.DeclarativeMappedTest):
     def test_pk_not_null_discriminator_null_from_base(self):
         (A,) = self.classes("A")
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(A).filter(A.id == 3)
         assert_raises_message(
             sa_exc.InvalidRequestError,
@@ -3399,7 +3470,7 @@ class DiscriminatorOrPkNoneTest(fixtures.DeclarativeMappedTest):
     def test_pk_not_null_discriminator_null_from_sub(self):
         (B,) = self.classes("B")
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(B).filter(B.id == 4)
         assert_raises_message(
             sa_exc.InvalidRequestError,
@@ -3453,23 +3524,23 @@ class UnexpectedPolymorphicIdentityTest(fixtures.DeclarativeMappedTest):
             __mapper_args__ = {"polymorphic_identity": "subb"}
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         ASingleSubA, ASingleSubB, AJoinedSubA, AJoinedSubB = cls.classes(
             "ASingleSubA", "ASingleSubB", "AJoinedSubA", "AJoinedSubB"
         )
-        s = Session()
+        with Session(connection) as s:
 
-        s.add_all([ASingleSubA(), ASingleSubB(), AJoinedSubA(), AJoinedSubB()])
-        s.commit()
+            s.add_all(
+                [ASingleSubA(), ASingleSubB(), AJoinedSubA(), AJoinedSubB()]
+            )
+            s.commit()
 
     def test_single_invalid_ident(self):
         ASingle, ASingleSubA = self.classes("ASingle", "ASingleSubA")
 
-        s = Session()
+        s = fixture_session()
 
-        q = s.query(ASingleSubA).select_entity_from(
-            select([ASingle]).subquery()
-        )
+        q = s.query(ASingleSubA).select_entity_from(select(ASingle).subquery())
 
         assert_raises_message(
             sa_exc.InvalidRequestError,
@@ -3483,11 +3554,9 @@ class UnexpectedPolymorphicIdentityTest(fixtures.DeclarativeMappedTest):
     def test_joined_invalid_ident(self):
         AJoined, AJoinedSubA = self.classes("AJoined", "AJoinedSubA")
 
-        s = Session()
+        s = fixture_session()
 
-        q = s.query(AJoinedSubA).select_entity_from(
-            select([AJoined]).subquery()
-        )
+        q = s.query(AJoinedSubA).select_entity_from(select(AJoined).subquery())
 
         assert_raises_message(
             sa_exc.InvalidRequestError,
@@ -3533,11 +3602,11 @@ class NameConflictTest(fixtures.MappedTest):
         mapper(
             Foo, self.tables.foo, inherits=Content, polymorphic_identity="foo"
         )
-        sess = create_session()
+        sess = fixture_session()
         f = Foo()
         f.content_type = "bar"
         sess.add(f)
         sess.flush()
         f_id = f.id
         sess.expunge_all()
-        assert sess.query(Content).get(f_id).content_type == "bar"
+        assert sess.get(Content, f_id).content_type == "bar"

@@ -1,9 +1,11 @@
 # sql/roles.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
 # the MIT License: http://www.opensource.org/licenses/mit-license.php
+
+from .. import util
 
 
 class SQLRole(object):
@@ -17,9 +19,25 @@ class SQLRole(object):
 
     """
 
+    allows_lambda = False
+    uses_inspection = False
+
 
 class UsesInspection(object):
-    pass
+    _post_inspect = None
+    uses_inspection = True
+
+
+class AllowsLambdaRole(object):
+    allows_lambda = True
+
+
+class HasCacheKeyRole(SQLRole):
+    _role_name = "Cacheable Core or ORM object"
+
+
+class LiteralValueRole(SQLRole):
+    _role_name = "Literal Python value"
 
 
 class ColumnArgumentRole(SQLRole):
@@ -27,6 +45,10 @@ class ColumnArgumentRole(SQLRole):
 
 
 class ColumnArgumentOrKeyRole(ColumnArgumentRole):
+    _role_name = "Column expression or string key"
+
+
+class StrAsPlainColumnRole(ColumnArgumentRole):
     _role_name = "Column expression or string key"
 
 
@@ -38,7 +60,7 @@ class TruncatedLabelRole(SQLRole):
     _role_name = "String SQL identifier"
 
 
-class ColumnsClauseRole(UsesInspection, ColumnListRole):
+class ColumnsClauseRole(AllowsLambdaRole, UsesInspection, ColumnListRole):
     _role_name = "Column expression or FROM clause"
 
     @property
@@ -54,7 +76,15 @@ class ByOfRole(ColumnListRole):
     _role_name = "GROUP BY / OF / etc. expression"
 
 
-class OrderByRole(ByOfRole):
+class GroupByRole(AllowsLambdaRole, UsesInspection, ByOfRole):
+    # note there's a special case right now where you can pass a whole
+    # ORM entity to group_by() and it splits out.   we may not want to keep
+    # this around
+
+    _role_name = "GROUP BY expression"
+
+
+class OrderByRole(AllowsLambdaRole, ByOfRole):
     _role_name = "ORDER BY expression"
 
 
@@ -66,7 +96,11 @@ class StatementOptionRole(StructuralRole):
     _role_name = "statement sub-expression element"
 
 
-class WhereHavingRole(StructuralRole):
+class OnClauseRole(AllowsLambdaRole, StructuralRole):
+    _role_name = "SQL expression for ON clause"
+
+
+class WhereHavingRole(OnClauseRole):
     _role_name = "SQL expression for WHERE/HAVING role"
 
 
@@ -92,7 +126,14 @@ class InElementRole(SQLRole):
     )
 
 
-class FromClauseRole(ColumnsClauseRole):
+class JoinTargetRole(AllowsLambdaRole, UsesInspection, StructuralRole):
+    _role_name = (
+        "Join target, typically a FROM expression, or ORM "
+        "relationship attribute"
+    )
+
+
+class FromClauseRole(ColumnsClauseRole, JoinTargetRole):
     _role_name = "FROM expression, such as a Table or alias() object"
 
     _is_subquery = False
@@ -111,27 +152,19 @@ class AnonymizedFromClauseRole(StrictFromClauseRole):
     # calls .alias() as a post processor
 
     def _anonymous_fromclause(self, name=None, flat=False):
-        """A synonym for ``.alias()`` that is only present on objects of this
-        role.
-
-        This is an implicit assurance of the target object being part of the
-        role where anonymous aliasing without any warnings is allowed,
-        as opposed to other kinds of SELECT objects that may or may not have
-        an ``.alias()`` method.
-
-        The method is used by the ORM but is currently semi-private to
-        preserve forwards-compatibility.
-
-        """
-        return self.alias(name=name, flat=flat)
+        raise NotImplementedError()
 
 
 class CoerceTextStatementRole(SQLRole):
-    _role_name = "Executable SQL, text() construct, or string statement"
+    _role_name = "Executable SQL or text() construct"
 
 
 class StatementRole(CoerceTextStatementRole):
     _role_name = "Executable SQL or text() construct"
+
+    _is_future = False
+
+    _propagate_attrs = util.immutabledict()
 
 
 class ReturnsRowsRole(StatementRole):
@@ -155,7 +188,7 @@ class HasCTERole(ReturnsRowsRole):
     pass
 
 
-class CompoundElementRole(SQLRole):
+class CompoundElementRole(AllowsLambdaRole, SQLRole):
     """SELECT statements inside a CompoundSelect, e.g. UNION, EXTRACT, etc."""
 
     _role_name = (
@@ -163,8 +196,13 @@ class CompoundElementRole(SQLRole):
     )
 
 
+# TODO: are we using this?
 class DMLRole(StatementRole):
     pass
+
+
+class DMLTableRole(FromClauseRole):
+    _role_name = "subject table for an INSERT, UPDATE or DELETE"
 
 
 class DMLColumnRole(SQLRole):

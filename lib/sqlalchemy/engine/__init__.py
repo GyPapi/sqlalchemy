@@ -1,5 +1,5 @@
 # engine/__init__.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -25,6 +25,13 @@ from .base import Transaction  # noqa
 from .base import TwoPhaseTransaction  # noqa
 from .create import create_engine
 from .create import engine_from_config
+from .cursor import BaseCursorResult  # noqa
+from .cursor import BufferedColumnResultProxy  # noqa
+from .cursor import BufferedColumnRow  # noqa
+from .cursor import BufferedRowResultProxy  # noqa
+from .cursor import CursorResult  # noqa
+from .cursor import FullyBufferedResultProxy  # noqa
+from .cursor import LegacyCursorResult  # noqa
 from .interfaces import Compiled  # noqa
 from .interfaces import Connectable  # noqa
 from .interfaces import CreateEnginePlugin  # noqa
@@ -33,13 +40,20 @@ from .interfaces import ExceptionContext  # noqa
 from .interfaces import ExecutionContext  # noqa
 from .interfaces import TypeCompiler  # noqa
 from .mock import create_mock_engine
-from .result import BaseRow  # noqa
-from .result import BufferedColumnResultProxy  # noqa
-from .result import BufferedColumnRow  # noqa
-from .result import BufferedRowResultProxy  # noqa
-from .result import FullyBufferedResultProxy  # noqa
-from .result import ResultProxy  # noqa
-from .result import Row  # noqa
+from .result import ChunkedIteratorResult  # noqa
+from .result import FrozenResult  # noqa
+from .result import IteratorResult  # noqa
+from .result import MappingResult  # noqa
+from .result import MergedResult  # noqa
+from .result import Result  # noqa
+from .result import result_tuple  # noqa
+from .result import ScalarResult  # noqa
+from .row import BaseRow  # noqa
+from .row import LegacyRow  # noqa
+from .row import Row  # noqa
+from .row import RowMapping  # noqa
+from .url import make_url  # noqa
+from .url import URL  # noqa
 from .util import connection_memoize  # noqa
 from ..sql import ddl  # noqa
 

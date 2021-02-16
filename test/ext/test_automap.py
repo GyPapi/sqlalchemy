@@ -30,7 +30,7 @@ class AutomapTest(fixtures.MappedTest):
         FixtureTest.define_tables(metadata)
 
     def test_relationship_o2m_default(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         Base.prepare()
 
         User = Base.classes.users
@@ -41,7 +41,7 @@ class AutomapTest(fixtures.MappedTest):
         assert a1.users is u1
 
     def test_relationship_explicit_override_o2m(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         prop = relationship("addresses", collection_class=set)
 
         class User(Base):
@@ -58,7 +58,7 @@ class AutomapTest(fixtures.MappedTest):
         assert a1.user is u1
 
     def test_exception_prepare_not_called(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         class User(Base):
             __tablename__ = "users"
@@ -75,7 +75,7 @@ class AutomapTest(fixtures.MappedTest):
         )
 
     def test_relationship_explicit_override_m2o(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         prop = relationship("users")
 
@@ -93,7 +93,7 @@ class AutomapTest(fixtures.MappedTest):
         assert a1.users is u1
 
     def test_relationship_self_referential(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         Base.prepare()
 
         Node = Base.classes.nodes
@@ -107,13 +107,13 @@ class AutomapTest(fixtures.MappedTest):
         """
         The underlying reflect call accepts an optional schema argument.
         This is for determining which database schema to load.
-        This test verifies that prepare can accept an optiona schema argument
-        and pass it to reflect.
+        This test verifies that prepare can accept an optional schema
+        argument and pass it to reflect.
         """
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         engine_mock = Mock()
         with patch.object(Base.metadata, "reflect") as reflect_mock:
-            Base.prepare(engine_mock, reflect=True, schema="some_schema")
+            Base.prepare(autoload_with=engine_mock, schema="some_schema")
             reflect_mock.assert_called_once_with(
                 engine_mock,
                 schema="some_schema",
@@ -128,10 +128,10 @@ class AutomapTest(fixtures.MappedTest):
         This test verifies that prepare passes a default None if no schema is
         provided.
         """
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         engine_mock = Mock()
         with patch.object(Base.metadata, "reflect") as reflect_mock:
-            Base.prepare(engine_mock, reflect=True)
+            Base.prepare(autoload_with=engine_mock)
             reflect_mock.assert_called_once_with(
                 engine_mock,
                 schema=None,
@@ -140,7 +140,7 @@ class AutomapTest(fixtures.MappedTest):
             )
 
     def test_naming_schemes(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         def classname_for_table(base, tablename, table):
             return str("cls_" + tablename)
@@ -170,7 +170,7 @@ class AutomapTest(fixtures.MappedTest):
         assert a1.scalar_cls_users is u1
 
     def test_relationship_m2m(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         Base.prepare()
 
@@ -182,7 +182,7 @@ class AutomapTest(fixtures.MappedTest):
         assert o1 in i1.orders_collection
 
     def test_relationship_explicit_override_forwards_m2m(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         class Order(Base):
             __tablename__ = "orders"
@@ -205,7 +205,7 @@ class AutomapTest(fixtures.MappedTest):
         assert o1 in i1.order_collection
 
     def test_relationship_pass_params(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         mock = Mock()
 
@@ -269,7 +269,7 @@ class CascadeTest(fixtures.MappedTest):
         )
 
     def test_o2m_relationship_cascade(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         Base.prepare()
 
         configure_mappers()
@@ -352,7 +352,7 @@ class AutomapInhTest(fixtures.MappedTest):
         class SubUser2(Single):
             __mapper_args__ = {"polymorphic_identity": "u2"}
 
-        Base.prepare(engine=testing.db, reflect=True)
+        Base.prepare(autoload_with=testing.db)
 
         assert SubUser2.__mapper__.inherits is Single.__mapper__
 
@@ -373,7 +373,7 @@ class AutomapInhTest(fixtures.MappedTest):
             __tablename__ = "joined_inh"
             __mapper_args__ = {"polymorphic_identity": "u1"}
 
-        Base.prepare(engine=testing.db, reflect=True)
+        Base.prepare(autoload_with=testing.db)
 
         assert SubJoined.__mapper__.inherits is Joined.__mapper__
 
@@ -387,8 +387,7 @@ class AutomapInhTest(fixtures.MappedTest):
             return None
 
         Base.prepare(
-            engine=testing.db,
-            reflect=True,
+            autoload_with=testing.db,
             generate_relationship=_gen_relationship,
         )
 
@@ -416,7 +415,7 @@ class ConcurrentAutomapTest(fixtures.TestBase):
     def _automap(self, e):
         Base = automap_base()
 
-        Base.prepare(e, reflect=True)
+        Base.prepare(autoload_with=e)
 
         time.sleep(0.01)
         configure_mappers()

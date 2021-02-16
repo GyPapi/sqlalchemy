@@ -12,6 +12,7 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -40,11 +41,11 @@ class SelectableNoFromsTest(fixtures.MappedTest, AssertsCompiledSQL):
     def test_no_tables(self):
         Subset = self.classes.Subset
 
-        selectable = select([column("x"), column("y"), column("z")]).alias()
+        selectable = select(column("x"), column("y"), column("z")).alias()
         mapper(Subset, selectable, primary_key=[selectable.c.x])
 
         self.assert_compile(
-            Session().query(Subset),
+            fixture_session().query(Subset),
             "SELECT anon_1.x AS anon_1_x, anon_1.y AS anon_1_y, "
             "anon_1.z AS anon_1_z FROM (SELECT x, y, z) AS anon_1",
             use_default_dialect=True,
@@ -53,7 +54,7 @@ class SelectableNoFromsTest(fixtures.MappedTest, AssertsCompiledSQL):
     def test_no_table_needs_pl(self):
         Subset = self.classes.Subset
 
-        selectable = select([column("x"), column("y"), column("z")]).alias()
+        selectable = select(column("x"), column("y"), column("z")).alias()
         assert_raises_message(
             sa.exc.ArgumentError,
             "could not assemble any primary key columns",
@@ -65,13 +66,13 @@ class SelectableNoFromsTest(fixtures.MappedTest, AssertsCompiledSQL):
     def test_no_selects(self):
         Subset, common = self.classes.Subset, self.tables.common
 
-        subset_select = select([common.c.id, common.c.data])
+        subset_select = select(common.c.id, common.c.data)
         assert_raises(sa.exc.ArgumentError, mapper, Subset, subset_select)
 
     def test_basic(self):
         Subset, common = self.classes.Subset, self.tables.common
 
-        subset_select = select([common.c.id, common.c.data]).alias()
+        subset_select = select(common.c.id, common.c.data).alias()
         mapper(Subset, subset_select)
         sess = Session(bind=testing.db)
         sess.add(Subset(data=1))

@@ -8,6 +8,7 @@ from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import TypeDecorator
 from sqlalchemy import union
+from sqlalchemy.sql import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
@@ -113,14 +114,14 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         table = self._fixture()
 
         self.assert_compile(
-            select([table]),
+            select(table),
             "SELECT test_table.x, lower(test_table.y) AS y FROM test_table",
         )
 
     def test_anonymous_expr(self):
         table = self._fixture()
         self.assert_compile(
-            select([cast(table.c.y, String)]),
+            select(cast(table.c.y, String)),
             "SELECT CAST(test_table.y AS VARCHAR) AS y FROM test_table",
         )
 
@@ -128,7 +129,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         table = self._fixture()
 
         self.assert_compile(
-            select([table]).apply_labels(),
+            select(table).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             "SELECT test_table.x AS test_table_x, "
             "lower(test_table.y) AS test_table_y FROM test_table",
         )
@@ -136,7 +137,11 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
     def test_select_cols_use_labels_result_map_targeting(self):
         table = self._fixture()
 
-        compiled = select([table]).apply_labels().compile()
+        compiled = (
+            select(table)
+            .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+            .compile()
+        )
         assert table.c.y in compiled._create_result_map()["test_table_y"][1]
         assert table.c.x in compiled._create_result_map()["test_table_x"][1]
 
@@ -169,7 +174,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
     def test_select_binds(self):
         table = self._fixture()
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT test_table.x, lower(test_table.y) AS y FROM "
             "test_table WHERE test_table.y = lower(:y_1)",
         )
@@ -180,7 +185,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
 
         # 'x' is straight String
         self.assert_compile(
-            select([table.c.x]).where(table.c.x == "hi"),
+            select(table.c.x).where(table.c.x == "hi"),
             "SELECT dialect_colexpr(test_table.x) AS x "
             "FROM test_table WHERE test_table.x = dialect_bind(:x_1)",
             dialect=dialect,
@@ -190,7 +195,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         table = self._type_decorator_inside_fixture()
 
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT test_table.x, inside_colexpr(test_table.y) AS y "
             "FROM test_table WHERE test_table.y = inside_bind(:y_1)",
         )
@@ -204,7 +209,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         # implementation supersedes that, which is the same as with other
         # processor functions
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT dialect_colexpr(test_table.x) AS x, "
             "dialect_colexpr(test_table.y) AS y FROM test_table "
             "WHERE test_table.y = dialect_bind(:y_1)",
@@ -215,7 +220,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         table = self._type_decorator_outside_fixture()
 
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT test_table.x, outside_colexpr(test_table.y) AS y "
             "FROM test_table WHERE test_table.y = outside_bind(:y_1)",
         )
@@ -227,7 +232,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         # for "outer", the MyString isn't calling the "impl" functions,
         # so we don't get the "impl"
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT dialect_colexpr(test_table.x) AS x, "
             "outside_colexpr(test_table.y) AS y "
             "FROM test_table WHERE test_table.y = outside_bind(:y_1)",
@@ -238,7 +243,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         table = self._type_decorator_both_fixture()
 
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT test_table.x, "
             "outside_colexpr(inside_colexpr(test_table.y)) AS y "
             "FROM test_table WHERE "
@@ -254,7 +259,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         # implementation supersedes that, which is the same as with other
         # processor functions
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT dialect_colexpr(test_table.x) AS x, "
             "outside_colexpr(dialect_colexpr(test_table.y)) AS y "
             "FROM test_table WHERE "
@@ -266,7 +271,7 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         table = self._variant_fixture(self._type_decorator_both_fixture())
 
         self.assert_compile(
-            select([table]).where(table.c.y == "hi"),
+            select(table).where(table.c.y == "hi"),
             "SELECT test_table.x, "
             "outside_colexpr(inside_colexpr(test_table.y)) AS y "
             "FROM test_table WHERE "
@@ -276,8 +281,8 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
     def test_compound_select(self):
         table = self._fixture()
 
-        s1 = select([table]).where(table.c.y == "hi")
-        s2 = select([table]).where(table.c.y == "there")
+        s1 = select(table).where(table.c.y == "hi")
+        s2 = select(table).where(table.c.y == "there")
 
         self.assert_compile(
             union(s1, s2),
@@ -290,8 +295,8 @@ class SelectTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
     def test_select_of_compound_select(self):
         table = self._fixture()
 
-        s1 = select([table]).where(table.c.y == "hi")
-        s2 = select([table]).where(table.c.y == "there")
+        s1 = select(table).where(table.c.y == "hi")
+        s2 = select(table).where(table.c.y == "there")
 
         self.assert_compile(
             union(s1, s2).alias().select(),
@@ -323,8 +328,8 @@ class DerivedTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
         s3 = j.select()
         self.assert_compile(
             s3,
-            "SELECT anon_1.x, lower(anon_1.y) AS y, anon_2.x, "
-            "lower(anon_2.y) AS y "
+            "SELECT anon_1.x, lower(anon_1.y) AS y, anon_2.x AS x_1, "
+            "lower(anon_2.y) AS y_1 "
             "FROM (SELECT test_table.x AS x, test_table.y AS y "
             "FROM test_table) AS anon_1 JOIN (SELECT "
             "test_table.x AS x, test_table.y AS y "
@@ -333,17 +338,19 @@ class DerivedTest(_ExprFixture, fixtures.TestBase, AssertsCompiledSQL):
 
 
 class RoundTripTestBase(object):
-    def test_round_trip(self):
-        testing.db.execute(
+    def test_round_trip(self, connection):
+        connection.execute(
             self.tables.test_table.insert(),
-            {"x": "X1", "y": "Y1"},
-            {"x": "X2", "y": "Y2"},
-            {"x": "X3", "y": "Y3"},
+            [
+                {"x": "X1", "y": "Y1"},
+                {"x": "X2", "y": "Y2"},
+                {"x": "X3", "y": "Y3"},
+            ],
         )
 
         # test insert coercion alone
         eq_(
-            testing.db.execute(
+            connection.exec_driver_sql(
                 "select * from test_table order by y"
             ).fetchall(),
             [("X1", "y1"), ("X2", "y2"), ("X3", "y3")],
@@ -351,50 +358,50 @@ class RoundTripTestBase(object):
 
         # conversion back to upper
         eq_(
-            testing.db.execute(
-                select([self.tables.test_table]).order_by(
+            connection.execute(
+                select(self.tables.test_table).order_by(
                     self.tables.test_table.c.y
                 )
             ).fetchall(),
             [("X1", "Y1"), ("X2", "Y2"), ("X3", "Y3")],
         )
 
-    def test_targeting_no_labels(self):
-        testing.db.execute(
+    def test_targeting_no_labels(self, connection):
+        connection.execute(
             self.tables.test_table.insert(), {"x": "X1", "y": "Y1"}
         )
-        row = testing.db.execute(select([self.tables.test_table])).first()
-        eq_(row[self.tables.test_table.c.y], "Y1")
+        row = connection.execute(select(self.tables.test_table)).first()
+        eq_(row._mapping[self.tables.test_table.c.y], "Y1")
 
-    def test_targeting_by_string(self):
-        testing.db.execute(
+    def test_targeting_by_string(self, connection):
+        connection.execute(
             self.tables.test_table.insert(), {"x": "X1", "y": "Y1"}
         )
-        row = testing.db.execute(select([self.tables.test_table])).first()
-        eq_(row["y"], "Y1")
+        row = connection.execute(select(self.tables.test_table)).first()
+        eq_(row._mapping["y"], "Y1")
 
-    def test_targeting_apply_labels(self):
-        testing.db.execute(
+    def test_targeting_apply_labels(self, connection):
+        connection.execute(
             self.tables.test_table.insert(), {"x": "X1", "y": "Y1"}
         )
-        row = testing.db.execute(
-            select([self.tables.test_table]).apply_labels()
-        ).first()
-        eq_(row[self.tables.test_table.c.y], "Y1")
-
-    def test_targeting_individual_labels(self):
-        testing.db.execute(
-            self.tables.test_table.insert(), {"x": "X1", "y": "Y1"}
-        )
-        row = testing.db.execute(
-            select(
-                [
-                    self.tables.test_table.c.x.label("xbar"),
-                    self.tables.test_table.c.y.label("ybar"),
-                ]
+        row = connection.execute(
+            select(self.tables.test_table).set_label_style(
+                LABEL_STYLE_TABLENAME_PLUS_COL
             )
         ).first()
-        eq_(row[self.tables.test_table.c.y], "Y1")
+        eq_(row._mapping[self.tables.test_table.c.y], "Y1")
+
+    def test_targeting_individual_labels(self, connection):
+        connection.execute(
+            self.tables.test_table.insert(), {"x": "X1", "y": "Y1"}
+        )
+        row = connection.execute(
+            select(
+                self.tables.test_table.c.x.label("xbar"),
+                self.tables.test_table.c.y.label("ybar"),
+            )
+        ).first()
+        eq_(row._mapping[self.tables.test_table.c.y], "Y1")
 
 
 class StringRoundTripTest(fixtures.TablesTest, RoundTripTestBase):
@@ -452,9 +459,9 @@ class ReturningTest(fixtures.TablesTest):
         )
 
     @testing.provide_metadata
-    def test_insert_returning(self):
+    def test_insert_returning(self, connection):
         table = self.tables.test_table
-        result = testing.db.execute(
+        result = connection.execute(
             table.insert().returning(table.c.y), {"x": "xvalue"}
         )
         eq_(result.first(), ("yvalue",))

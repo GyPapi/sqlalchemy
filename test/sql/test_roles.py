@@ -1,17 +1,21 @@
 from sqlalchemy import bindparam
 from sqlalchemy import Column
+from sqlalchemy import column
 from sqlalchemy import exc
+from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import select
+from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import table
 from sqlalchemy import testing
 from sqlalchemy import text
+from sqlalchemy import update
 from sqlalchemy.schema import DDL
 from sqlalchemy.schema import Sequence
 from sqlalchemy.sql import ClauseElement
 from sqlalchemy.sql import coercions
-from sqlalchemy.sql import column
 from sqlalchemy.sql import false
 from sqlalchemy.sql import False_
 from sqlalchemy.sql import literal
@@ -25,6 +29,7 @@ from sqlalchemy.sql.selectable import FromGrouping
 from sqlalchemy.sql.selectable import SelectStatementGrouping
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_instance_of
@@ -130,8 +135,8 @@ class RoleTest(fixtures.TestBase):
         is_true(
             expect(
                 roles.LabeledColumnExprRole,
-                select([column("q")]).scalar_subquery(),
-            ).compare(select([column("q")]).label(None))
+                select(column("q")).scalar_subquery(),
+            ).compare(select(column("q")).label(None))
         )
 
         is_true(
@@ -140,27 +145,55 @@ class RoleTest(fixtures.TestBase):
             )
         )
 
+    def test_no_clauseelement_in_bind(self):
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            r"Literal Python value expected, got BindParameter",
+        ):
+            literal(bindparam("x"))
+
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            r"Literal Python value expected, got .*ColumnClause",
+        ):
+            literal(column("q"))
+
     def test_scalar_select_no_coercion(self):
-        # this is also tested in test/sql/test_deprecations.py; when the
-        # deprecation is turned to an error, those tests go away, and these
-        # will assert the correct exception plus informative error message.
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            expect(
+                roles.LabeledColumnExprRole,
+                select(column("q")),
+            )
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            expect(
+                roles.LabeledColumnExprRole,
+                select(column("q")).alias(),
+            )
+
+    def test_table_valued_advice(self):
+        msg = (
+            r"SQL expression element expected, got %s. To create a "
+            r"column expression from a FROM clause row as a whole, "
+            r"use the .table_valued\(\) method."
+        )
         assert_raises_message(
-            exc.SADeprecationWarning,
-            "coercing SELECT object to scalar subquery in a column-expression "
-            "context is deprecated",
+            exc.ArgumentError,
+            msg % ("Table.*",),
             expect,
-            roles.LabeledColumnExprRole,
-            select([column("q")]),
+            roles.ExpressionElementRole,
+            t,
         )
 
-        assert_raises_message(
-            exc.SADeprecationWarning,
-            "coercing SELECT object to scalar subquery in a column-expression "
-            "context is deprecated",
-            expect,
-            roles.LabeledColumnExprRole,
-            select([column("q")]).alias(),
-        )
+        # no table_valued() message here right now, it goes to scalar subquery
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            expect(roles.ExpressionElementRole, t.select().alias())
 
     def test_statement_no_text_coercion(self):
         assert_raises_message(
@@ -173,11 +206,14 @@ class RoleTest(fixtures.TestBase):
         )
 
     def test_statement_text_coercion(self):
-        is_true(
-            expect(
-                roles.CoerceTextStatementRole, "select * from table"
-            ).compare(text("select * from table"))
-        )
+        with testing.expect_deprecated_20(
+            "Using plain strings to indicate SQL statements"
+        ):
+            is_true(
+                expect(
+                    roles.CoerceTextStatementRole, "select * from table"
+                ).compare(text("select * from table"))
+            )
 
     def test_select_statement_no_text_coercion(self):
         assert_raises_message(
@@ -195,25 +231,23 @@ class RoleTest(fixtures.TestBase):
             "constructs into FROM clauses is deprecated;"
         ):
             element = expect(
-                roles.FromClauseRole, SelectStatementGrouping(select([t]))
+                roles.FromClauseRole, SelectStatementGrouping(select(t))
             )
             is_true(
-                element.compare(
-                    SelectStatementGrouping(select([t])).subquery()
-                )
+                element.compare(SelectStatementGrouping(select(t)).subquery())
             )
 
     def test_offset_or_limit_role_only_ints_or_clauseelement(self):
-        assert_raises(ValueError, select([t]).limit, "some limit")
+        assert_raises(ValueError, select(t).limit, "some limit")
 
-        assert_raises(ValueError, select([t]).offset, "some offset")
+        assert_raises(ValueError, select(t).offset, "some offset")
 
     def test_offset_or_limit_role_clauseelement(self):
         bind = bindparam("x")
-        stmt = select([t]).limit(bind)
+        stmt = select(t).limit(bind)
         is_(stmt._limit_clause, bind)
 
-        stmt = select([t]).offset(bind)
+        stmt = select(t).offset(bind)
         is_(stmt._offset_clause, bind)
 
     def test_from_clause_is_not_a_select(self):
@@ -235,9 +269,7 @@ class RoleTest(fixtures.TestBase):
 
     def test_statement_coercion_select(self):
         is_true(
-            expect(roles.CoerceTextStatementRole, select([t])).compare(
-                select([t])
-            )
+            expect(roles.CoerceTextStatementRole, select(t)).compare(select(t))
         )
 
     def test_statement_coercion_ddl(self):
@@ -245,15 +277,15 @@ class RoleTest(fixtures.TestBase):
         is_(expect(roles.CoerceTextStatementRole, d1), d1)
 
     def test_strict_from_clause_role(self):
-        stmt = select([t]).subquery()
+        stmt = select(t).subquery()
         is_true(
             expect(roles.StrictFromClauseRole, stmt).compare(
-                select([t]).subquery()
+                select(t).subquery()
             )
         )
 
     def test_strict_from_clause_role_disallow_select(self):
-        stmt = select([t])
+        stmt = select(t)
         assert_raises_message(
             exc.ArgumentError,
             r"FROM expression, such as a Table or alias\(\) "
@@ -273,8 +305,8 @@ class RoleTest(fixtures.TestBase):
         # than just replacing the outer alias.
         is_true(
             expect(
-                roles.AnonymizedFromClauseRole, select([t]).subquery()
-            ).compare(select([t]).subquery().alias())
+                roles.AnonymizedFromClauseRole, select(t).subquery()
+            ).compare(select(t).subquery().alias())
         )
 
     def test_statement_coercion_sequence(self):
@@ -298,3 +330,170 @@ class RoleTest(fixtures.TestBase):
 
     def test_columns_clause_role_neg(self):
         self._test_role_neg_comparisons(roles.ColumnsClauseRole)
+
+
+class SubqueryCoercionsTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = "default"
+
+    table1 = table(
+        "mytable",
+        column("myid", Integer),
+        column("name", String),
+        column("description", String),
+    )
+
+    table2 = table(
+        "myothertable", column("otherid", Integer), column("othername", String)
+    )
+
+    def test_column_roles(self):
+        stmt = select(self.table1.c.myid)
+
+        for role in [
+            roles.WhereHavingRole,
+            roles.ExpressionElementRole,
+            roles.ByOfRole,
+            roles.OrderByRole,
+            # roles.LabeledColumnExprRole
+        ]:
+            with testing.expect_warnings(
+                "implicitly coercing SELECT object to scalar subquery"
+            ):
+                coerced = coercions.expect(role, stmt)
+                is_true(coerced.compare(stmt.scalar_subquery()))
+
+            with testing.expect_warnings(
+                "implicitly coercing SELECT object to scalar subquery"
+            ):
+                coerced = coercions.expect(role, stmt.alias())
+                is_true(coerced.compare(stmt.scalar_subquery()))
+
+    def test_labeled_role(self):
+        stmt = select(self.table1.c.myid)
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            coerced = coercions.expect(roles.LabeledColumnExprRole, stmt)
+            is_true(coerced.compare(stmt.scalar_subquery().label(None)))
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            coerced = coercions.expect(
+                roles.LabeledColumnExprRole, stmt.alias()
+            )
+            is_true(coerced.compare(stmt.scalar_subquery().label(None)))
+
+    def test_scalar_select(self):
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            self.assert_compile(
+                func.coalesce(select(self.table1.c.myid)),
+                "coalesce((SELECT mytable.myid FROM mytable))",
+            )
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            s = select(self.table1.c.myid).alias()
+            self.assert_compile(
+                select(self.table1.c.myid).where(self.table1.c.myid == s),
+                "SELECT mytable.myid FROM mytable WHERE "
+                "mytable.myid = (SELECT mytable.myid FROM "
+                "mytable)",
+            )
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            self.assert_compile(
+                select(self.table1.c.myid).where(s > self.table1.c.myid),
+                "SELECT mytable.myid FROM mytable WHERE "
+                "mytable.myid < (SELECT mytable.myid FROM "
+                "mytable)",
+            )
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            s = select(self.table1.c.myid).alias()
+            self.assert_compile(
+                select(self.table1.c.myid).where(self.table1.c.myid == s),
+                "SELECT mytable.myid FROM mytable WHERE "
+                "mytable.myid = (SELECT mytable.myid FROM "
+                "mytable)",
+            )
+
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            self.assert_compile(
+                select(self.table1.c.myid).where(s > self.table1.c.myid),
+                "SELECT mytable.myid FROM mytable WHERE "
+                "mytable.myid < (SELECT mytable.myid FROM "
+                "mytable)",
+            )
+
+    @testing.fixture()
+    def update_from_fixture(self):
+        metadata = MetaData()
+
+        mytable = Table(
+            "mytable",
+            metadata,
+            Column("myid", Integer),
+            Column("name", String(30)),
+            Column("description", String(50)),
+        )
+        myothertable = Table(
+            "myothertable",
+            metadata,
+            Column("otherid", Integer),
+            Column("othername", String(30)),
+        )
+        return mytable, myothertable
+
+    def test_correlated_update_two(self, update_from_fixture):
+        table1, t2 = update_from_fixture
+
+        mt = table1.alias()
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            u = update(table1).values(
+                {
+                    table1.c.name: select(mt.c.name).where(
+                        mt.c.myid == table1.c.myid
+                    )
+                },
+            )
+        self.assert_compile(
+            u,
+            "UPDATE mytable SET name=(SELECT mytable_1.name FROM "
+            "mytable AS mytable_1 WHERE "
+            "mytable_1.myid = mytable.myid)",
+        )
+
+    def test_correlated_update_three(self, update_from_fixture):
+        table1, table2 = update_from_fixture
+
+        # test against a regular constructed subquery
+        s = select(table2).where(table2.c.otherid == table1.c.myid)
+        with testing.expect_warnings(
+            "implicitly coercing SELECT object to scalar subquery"
+        ):
+            u = (
+                update(table1)
+                .where(table1.c.name == "jack")
+                .values({table1.c.name: s})
+            )
+        self.assert_compile(
+            u,
+            "UPDATE mytable SET name=(SELECT myothertable.otherid, "
+            "myothertable.othername FROM myothertable WHERE "
+            "myothertable.otherid = mytable.myid) "
+            "WHERE mytable.name = :name_1",
+        )

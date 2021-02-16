@@ -1,4 +1,3 @@
-from sqlalchemy import pool as pool_module
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.testing import AssertsExecutionResults
 from sqlalchemy.testing import fixtures
@@ -9,7 +8,7 @@ pool = None
 
 
 class QueuePoolTest(fixtures.TestBase, AssertsExecutionResults):
-    __requires__ = ("cpython",)
+    __requires__ = ("cpython", "python_profiling_backend")
 
     class Connection(object):
         def rollback(self):
@@ -18,14 +17,7 @@ class QueuePoolTest(fixtures.TestBase, AssertsExecutionResults):
         def close(self):
             pass
 
-    def teardown(self):
-        # the tests leave some fake connections
-        # around which don't necessarily
-        # get gc'ed as quickly as we'd like all the time,
-        # particularly for non-refcount gc
-        pool_module._refs.clear()
-
-    def setup(self):
+    def setup_test(self):
         # create a throwaway pool which
         # has the effect of initializing
         # class-level event listeners on Pool,

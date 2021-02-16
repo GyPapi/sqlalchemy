@@ -1,6 +1,6 @@
 /*
 resultproxy.c
-Copyright (C) 2010-2020 the SQLAlchemy authors and contributors <see AUTHORS file>
+Copyright (C) 2010-2021 the SQLAlchemy authors and contributors <see AUTHORS file>
 Copyright (C) 2010-2011 Gaetan de Menten gdementen@gmail.com
 
 This module is part of SQLAlchemy and is released under
@@ -21,7 +21,7 @@ typedef Py_ssize_t (*lenfunc)(PyObject *);
 typedef intargfunc ssizeargfunc;
 #endif
 
-#if PY_MAJOR_VERSON < 3
+#if PY_MAJOR_VERSION < 3
 
 // new typedef in Python 3
 typedef long Py_hash_t;
@@ -45,7 +45,18 @@ typedef struct {
     PyObject *parent;
     PyObject *row;
     PyObject *keymap;
+    long key_style;
 } BaseRow;
+
+
+static PyObject *sqlalchemy_engine_row = NULL;
+static PyObject *sqlalchemy_engine_result = NULL;
+
+
+//static int KEY_INTEGER_ONLY = 0;
+static int KEY_OBJECTS_ONLY = 1;
+static int KEY_OBJECTS_BUT_WARN = 2;
+//static int KEY_OBJECTS_NO_WARN = 3;
 
 /****************
  * BaseRow *
@@ -86,13 +97,13 @@ safe_rowproxy_reconstructor(PyObject *self, PyObject *args)
 static int
 BaseRow_init(BaseRow *self, PyObject *args, PyObject *kwds)
 {
-    PyObject *parent, *keymap, *row, *processors;
+    PyObject *parent, *keymap, *row, *processors, *key_style;
     Py_ssize_t num_values, num_processors;
     PyObject **valueptr, **funcptr, **resultptr;
     PyObject *func, *result, *processed_value, *values_fastseq;
 
-    if (!PyArg_UnpackTuple(args, "BaseRow", 4, 4,
-                           &parent, &processors, &keymap, &row))
+    if (!PyArg_UnpackTuple(args, "BaseRow", 5, 5,
+                           &parent, &processors, &keymap, &key_style, &row))
         return -1;
 
     Py_INCREF(parent);
@@ -103,44 +114,61 @@ BaseRow_init(BaseRow *self, PyObject *args, PyObject *kwds)
         return -1;
 
     num_values = PySequence_Length(values_fastseq);
-    num_processors = PyList_Size(processors);
-    if (num_values != num_processors) {
-        PyErr_Format(PyExc_RuntimeError,
-            "number of values in row (%d) differ from number of column "
-            "processors (%d)",
-            (int)num_values, (int)num_processors);
-        return -1;
+
+
+    if (processors != Py_None) {
+        num_processors = PySequence_Size(processors);
+        if (num_values != num_processors) {
+            PyErr_Format(PyExc_RuntimeError,
+                "number of values in row (%d) differ from number of column "
+                "processors (%d)",
+                (int)num_values, (int)num_processors);
+            return -1;
+        }
+
+    } else {
+        num_processors = -1;
     }
 
     result = PyTuple_New(num_values);
     if (result == NULL)
         return -1;
 
-    valueptr = PySequence_Fast_ITEMS(values_fastseq);
-    funcptr = PySequence_Fast_ITEMS(processors);
-    resultptr = PySequence_Fast_ITEMS(result);
-    while (--num_values >= 0) {
-        func = *funcptr;
-        if (func != Py_None) {
-            processed_value = PyObject_CallFunctionObjArgs(
-                func, *valueptr, NULL);
-            if (processed_value == NULL) {
-                Py_DECREF(values_fastseq);
-                Py_DECREF(result);
-                return -1;
+    if (num_processors != -1) {
+        valueptr = PySequence_Fast_ITEMS(values_fastseq);
+        funcptr = PySequence_Fast_ITEMS(processors);
+        resultptr = PySequence_Fast_ITEMS(result);
+        while (--num_values >= 0) {
+            func = *funcptr;
+            if (func != Py_None) {
+                processed_value = PyObject_CallFunctionObjArgs(
+                    func, *valueptr, NULL);
+                if (processed_value == NULL) {
+                    Py_DECREF(values_fastseq);
+                    Py_DECREF(result);
+                    return -1;
+                }
+                *resultptr = processed_value;
+            } else {
+                Py_INCREF(*valueptr);
+                *resultptr = *valueptr;
             }
-            *resultptr = processed_value;
-        } else {
+            valueptr++;
+            funcptr++;
+            resultptr++;
+        }
+    } else {
+        valueptr = PySequence_Fast_ITEMS(values_fastseq);
+        resultptr = PySequence_Fast_ITEMS(result);
+        while (--num_values >= 0) {
             Py_INCREF(*valueptr);
             *resultptr = *valueptr;
+            valueptr++;
+            resultptr++;
         }
-        valueptr++;
-        funcptr++;
-        resultptr++;
     }
 
     Py_DECREF(values_fastseq);
-
     self->row = result;
 
     if (!PyDict_CheckExact(keymap)) {
@@ -149,7 +177,7 @@ BaseRow_init(BaseRow *self, PyObject *args, PyObject *kwds)
     }
     Py_INCREF(keymap);
     self->keymap = keymap;
-
+    self->key_style = PyLong_AsLong(key_style);
     return 0;
 }
 
@@ -172,12 +200,14 @@ BaseRow_reduce(PyObject *self)
     if (state == NULL)
         return NULL;
 
-    module = PyImport_ImportModule("sqlalchemy.engine.result");
-    if (module == NULL)
-        return NULL;
+    if (sqlalchemy_engine_row == NULL) {
+        module = PyImport_ImportModule("sqlalchemy.engine.row");
+        if (module == NULL)
+            return NULL;
+        sqlalchemy_engine_row = module;
+    }
 
-    reconstructor = PyObject_GetAttrString(module, "rowproxy_reconstructor");
-    Py_DECREF(module);
+    reconstructor = PyObject_GetAttrString(sqlalchemy_engine_row, "rowproxy_reconstructor");
     if (reconstructor == NULL) {
         Py_DECREF(state);
         return NULL;
@@ -191,6 +221,38 @@ BaseRow_reduce(PyObject *self)
     }
 
     return Py_BuildValue("(N(NN))", reconstructor, cls, state);
+}
+
+static PyObject *
+BaseRow_filter_on_values(BaseRow *self, PyObject *filters)
+{
+    PyObject *module, *row_class, *new_obj, *key_style;
+
+    if (sqlalchemy_engine_row == NULL) {
+        module = PyImport_ImportModule("sqlalchemy.engine.row");
+        if (module == NULL)
+            return NULL;
+        sqlalchemy_engine_row = module;
+    }
+
+    // TODO: do we want to get self.__class__ instead here?   I'm not sure
+    // how to use METH_VARARGS and then also get the BaseRow struct
+    // at the same time
+    row_class = PyObject_GetAttrString(sqlalchemy_engine_row, "Row");
+
+    key_style = PyLong_FromLong(self->key_style);
+
+    new_obj = PyObject_CallFunction(
+        row_class, "OOOOO", self->parent, filters, self->keymap,
+        key_style, self->row);
+    Py_DECREF(key_style);
+    Py_DECREF(row_class);
+    if (new_obj == NULL) {
+        return NULL;
+    }
+
+    return new_obj;
+
 }
 
 static void
@@ -277,25 +339,30 @@ BaseRow_getitem(BaseRow *self, Py_ssize_t i)
 }
 
 static PyObject *
-BaseRow_getitem_by_object(BaseRow *self, PyObject *key)
+BaseRow_getitem_by_object(BaseRow *self, PyObject *key, int asmapping)
 {
     PyObject *record, *indexobject;
-    PyObject *exc_module, *exception, *cstr_obj;
-#if PY_MAJOR_VERSION >= 3
-    PyObject *bytes;
-#endif
-    char *cstr_key;
     long index;
     int key_fallback = 0;
 
-    // if record is non null, it's a borrowed reference
+    // we want to raise TypeError for slice access on a mapping.
+    // Py3 will do this with PyDict_GetItemWithError, Py2 will do it
+    // with PyObject_GetItem.  However in the Python2 case the object
+    // protocol gets in the way for reasons not entirely clear, so
+    // detect slice we have a key error and raise directly.
+
     record = PyDict_GetItem((PyObject *)self->keymap, key);
 
     if (record == NULL) {
+        if (PySlice_Check(key)) {
+            PyErr_Format(PyExc_TypeError, "can't use slices for mapping access");
+            return NULL;
+        }
         record = PyObject_CallMethod(self->parent, "_key_fallback",
-                                     "O", key);
+                                     "OO", key, Py_None);
         if (record == NULL)
             return NULL;
+
         key_fallback = 1;  // boolean to indicate record is a new reference
     }
 
@@ -308,49 +375,14 @@ BaseRow_getitem_by_object(BaseRow *self, PyObject *key)
     }
 
     if (indexobject == Py_None) {
-        exc_module = PyImport_ImportModule("sqlalchemy.exc");
-        if (exc_module == NULL)
-            return NULL;
+        PyObject *tmp;
 
-        exception = PyObject_GetAttrString(exc_module,
-                                           "InvalidRequestError");
-        Py_DECREF(exc_module);
-        if (exception == NULL)
-            return NULL;
-
-        cstr_obj = PyTuple_GetItem(record, 2);
-        if (cstr_obj == NULL)
-            return NULL;
-
-        cstr_obj = PyObject_Str(cstr_obj);
-        if (cstr_obj == NULL)
-            return NULL;
-
-/*
-       FIXME: raise encoding error exception (in both versions below)
-       if the key contains non-ascii chars, instead of an
-       InvalidRequestError without any message like in the
-       python version.
-*/
-
-
-#if PY_MAJOR_VERSION >= 3
-        bytes = PyUnicode_AsASCIIString(cstr_obj);
-        if (bytes == NULL)
-            return NULL;
-        cstr_key = PyBytes_AS_STRING(bytes);
-#else
-        cstr_key = PyString_AsString(cstr_obj);
-#endif
-        if (cstr_key == NULL) {
-            Py_DECREF(cstr_obj);
+        tmp = PyObject_CallMethod(self->parent, "_raise_for_ambiguous_column_name", "(O)", record);
+        if (tmp == NULL) {
             return NULL;
         }
-        Py_DECREF(cstr_obj);
+        Py_DECREF(tmp);
 
-        PyErr_Format(exception,
-                "Ambiguous column name '%.200s' in "
-                "result set column descriptions", cstr_key);
         return NULL;
     }
 
@@ -362,6 +394,16 @@ BaseRow_getitem_by_object(BaseRow *self, PyObject *key)
     if ((index == -1) && PyErr_Occurred())
         /* -1 can be either the actual value, or an error flag. */
         return NULL;
+
+    if (!asmapping && self->key_style == KEY_OBJECTS_BUT_WARN) {
+        PyObject *tmp;
+
+        tmp = PyObject_CallMethod(self->parent, "_warn_for_nonint", "O", key);
+        if (tmp == NULL) {
+            return NULL;
+        }
+        Py_DECREF(tmp);
+    }
 
     return BaseRow_getitem(self, index);
 
@@ -376,22 +418,47 @@ BaseRow_subscript_impl(BaseRow *self, PyObject *key, int asmapping)
 
 #if PY_MAJOR_VERSION < 3
     if (PyInt_CheckExact(key)) {
+        if (self->key_style == KEY_OBJECTS_ONLY) {
+            // TODO: being very lazy with error catching here
+            PyErr_Format(PyExc_KeyError, "%s", PyString_AsString(PyObject_Repr(key)));
+            return NULL;
+        }
         index = PyInt_AS_LONG(key);
+
+        // support negative indexes.   We can also call PySequence_GetItem,
+        // but here we can stay with the simpler tuple protocol
+        // rather than the seqeunce protocol which has to check for
+        // __getitem__ methods etc.
         if (index < 0)
-            index += BaseRow_length(self);
+            index += (long)BaseRow_length(self);
         return BaseRow_getitem(self, index);
     } else
 #endif
 
     if (PyLong_CheckExact(key)) {
+        if (self->key_style == KEY_OBJECTS_ONLY) {
+#if PY_MAJOR_VERSION < 3
+            // TODO: being very lazy with error catching here
+            PyErr_Format(PyExc_KeyError, "%s", PyString_AsString(PyObject_Repr(key)));
+#else
+            PyErr_Format(PyExc_KeyError, "%R", key);
+#endif
+            return NULL;
+        }
         index = PyLong_AsLong(key);
-        if ((index == -1) && PyErr_Occurred())
+        if ((index == -1) && PyErr_Occurred() != NULL)
             /* -1 can be either the actual value, or an error flag. */
             return NULL;
+
+        // support negative indexes.   We can also call PySequence_GetItem,
+        // but here we can stay with the simpler tuple protocol
+        // rather than the seqeunce protocol which has to check for
+        // __getitem__ methods etc.
         if (index < 0)
-            index += BaseRow_length(self);
+            index += (long)BaseRow_length(self);
         return BaseRow_getitem(self, index);
-    } else if (PySlice_Check(key)) {
+
+    } else if (PySlice_Check(key) && self->key_style != KEY_OBJECTS_ONLY) {
         values = PyObject_GetItem(self->row, key);
         if (values == NULL)
             return NULL;
@@ -400,17 +467,7 @@ BaseRow_subscript_impl(BaseRow *self, PyObject *key, int asmapping)
         Py_DECREF(values);
         return result;
     } else {
-        /*
-         // if we want to warn for non-integer access by getitem,
-         // that would happen here.
-         if (!asmapping) {
-            tmp = PyObject_CallMethod(self->parent, "_warn_for_nonint", "");
-            if (tmp == NULL) {
-                return NULL;
-            }
-            Py_DECREF(tmp);
-        }*/
-        return BaseRow_getitem_by_object(self, key);
+        return BaseRow_getitem_by_object(self, key, asmapping);
     }
 }
 
@@ -423,7 +480,12 @@ BaseRow_subscript(BaseRow *self, PyObject *key)
 static PyObject *
 BaseRow_subscript_mapping(BaseRow *self, PyObject *key)
 {
-    return BaseRow_subscript_impl(self, key, 1);
+    if (self->key_style == KEY_OBJECTS_BUT_WARN) {
+        return BaseRow_subscript_impl(self, key, 0);
+    }
+    else {
+        return BaseRow_subscript_impl(self, key, 1);
+    }
 }
 
 
@@ -443,7 +505,8 @@ BaseRow_getattro(BaseRow *self, PyObject *name)
     else
         return tmp;
 
-    tmp = BaseRow_subscript_mapping(self, name);
+    tmp = BaseRow_subscript_impl(self, name, 1);
+
     if (tmp == NULL && PyErr_ExceptionMatches(PyExc_KeyError)) {
 
 #if PY_MAJOR_VERSION >= 3
@@ -489,12 +552,14 @@ BaseRow_setparent(BaseRow *self, PyObject *value, void *closure)
         return -1;
     }
 
-    module = PyImport_ImportModule("sqlalchemy.engine.result");
-    if (module == NULL)
-        return -1;
+    if (sqlalchemy_engine_result == NULL) {
+        module = PyImport_ImportModule("sqlalchemy.engine.result");
+        if (module == NULL)
+            return -1;
+        sqlalchemy_engine_result = module;
+    }
 
-    cls = PyObject_GetAttrString(module, "ResultMetaData");
-    Py_DECREF(module);
+    cls = PyObject_GetAttrString(sqlalchemy_engine_result, "ResultMetaData");
     if (cls == NULL)
         return -1;
 
@@ -572,6 +637,40 @@ BaseRow_setkeymap(BaseRow *self, PyObject *value, void *closure)
     return 0;
 }
 
+static PyObject *
+BaseRow_getkeystyle(BaseRow *self, void *closure)
+{
+    PyObject *result;
+
+    result = PyLong_FromLong(self->key_style);
+    Py_INCREF(result);
+    return result;
+}
+
+
+static int
+BaseRow_setkeystyle(BaseRow *self, PyObject *value, void *closure)
+{
+    if (value == NULL) {
+
+        PyErr_SetString(
+            PyExc_TypeError,
+            "Cannot delete the 'key_style' attribute");
+        return -1;
+    }
+
+    if (!PyLong_CheckExact(value)) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "The 'key_style' attribute value must be an integer");
+        return -1;
+    }
+
+    self->key_style = PyLong_AsLong(value);
+
+    return 0;
+}
+
 static PyGetSetDef BaseRow_getseters[] = {
     {"_parent",
      (getter)BaseRow_getparent, (setter)BaseRow_setparent,
@@ -585,6 +684,10 @@ static PyGetSetDef BaseRow_getseters[] = {
      (getter)BaseRow_getkeymap, (setter)BaseRow_setkeymap,
      "Key to (obj, index) dict",
      NULL},
+    {"_key_style",
+     (getter)BaseRow_getkeystyle, (setter)BaseRow_setkeystyle,
+     "Return the key style",
+     NULL},
     {NULL}
 };
 
@@ -597,9 +700,18 @@ static PyMethodDef BaseRow_methods[] = {
     "implement mapping-like getitem as well as sequence getitem"},
     {"_get_by_key_impl_mapping", (PyCFunction)BaseRow_subscript_mapping, METH_O,
     "implement mapping-like getitem as well as sequence getitem"},
+    {"_filter_on_values", (PyCFunction)BaseRow_filter_on_values, METH_O,
+    "return a new Row with per-value filters applied to columns"},
+
     {NULL}  /* Sentinel */
 };
 
+// currently, the sq_item hook is not used by Python except for slices,
+// because we also implement subscript_mapping which seems to intercept
+// integers.  Ideally, when there
+// is a complete separation of "row" from "mapping", we can make
+// two separate types here so that one has only sq_item and the other
+// has only mp_subscript.
 static PySequenceMethods BaseRow_as_sequence = {
     (lenfunc)BaseRow_length,   /* sq_length */
     0,                              /* sq_concat */
@@ -721,14 +833,18 @@ tuplegetter_traverse(tuplegetterobject *tg, visitproc visit, void *arg)
 static PyObject *
 tuplegetter_call(tuplegetterobject *tg, PyObject *args, PyObject *kw)
 {
-    PyObject *row, *result;
+    PyObject *row_or_tuple, *result;
     Py_ssize_t i, nitems=tg->nitems;
+    int has_row_method;
 
     assert(PyTuple_CheckExact(args));
 
-    // this is normally a BaseRow subclass but we are not doing
-    // strict checking at the moment
-    row = PyTuple_GET_ITEM(args, 0);
+    // this is a tuple, however if its a BaseRow subclass we want to
+    // call specific methods to bypass the pure python LegacyRow.__getitem__
+    // method for now
+    row_or_tuple = PyTuple_GET_ITEM(args, 0);
+
+    has_row_method = PyObject_HasAttrString(row_or_tuple, "_get_by_key_impl_mapping");
 
     assert(PyTuple_Check(tg->item));
     assert(PyTuple_GET_SIZE(tg->item) == nitems);
@@ -741,11 +857,13 @@ tuplegetter_call(tuplegetterobject *tg, PyObject *args, PyObject *kw)
         PyObject *item, *val;
         item = PyTuple_GET_ITEM(tg->item, i);
 
-        val = PyObject_CallMethod(row, "_get_by_key_impl_mapping", "O", item);
+        if (has_row_method) {
+            val = PyObject_CallMethod(row_or_tuple, "_get_by_key_impl_mapping", "O", item);
+        }
+        else {
+            val = PyObject_GetItem(row_or_tuple, item);
+        }
 
-        // generic itemgetter version; if BaseRow __getitem__ is implemented
-        // in C directly then we can use that
-        //val = PyObject_GetItem(row, item);
         if (val == NULL) {
             Py_DECREF(result);
             return NULL;
@@ -796,7 +914,7 @@ and returns them as a tuple.\n");
 
 static PyTypeObject tuplegetter_type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "sqlalchemy.engine.util..tuplegetter",  /* tp_name */
+    "sqlalchemy.engine.util.tuplegetter",  /* tp_name */
     sizeof(tuplegetterobject),           /* tp_basicsize */
     0,                                  /* tp_itemsize */
     /* methods */

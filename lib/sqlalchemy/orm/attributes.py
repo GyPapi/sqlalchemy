@@ -1,5 +1,5 @@
 # orm/attributes.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -34,6 +34,7 @@ from .base import NO_CHANGE  # noqa
 from .base import NO_RAISE
 from .base import NO_VALUE
 from .base import NON_PERSISTENT_OK  # noqa
+from .base import PASSIVE_CLASS_MISMATCH  # noqa
 from .base import PASSIVE_NO_FETCH
 from .base import PASSIVE_NO_FETCH_RELATED  # noqa
 from .base import PASSIVE_NO_INITIALIZE
@@ -48,6 +49,8 @@ from .. import event
 from .. import inspection
 from .. import util
 from ..sql import base as sql_base
+from ..sql import roles
+from ..sql import traversals
 from ..sql import visitors
 
 
@@ -56,7 +59,11 @@ class QueryableAttribute(
     interfaces._MappedAttribute,
     interfaces.InspectionAttr,
     interfaces.PropComparator,
-    sql_base.HasCacheKey,
+    traversals.HasCopyInternals,
+    roles.JoinTargetRole,
+    roles.OnClauseRole,
+    sql_base.Immutable,
+    sql_base.MemoizedHasCacheKey,
 ):
     """Base class for :term:`descriptor` objects that intercept
     attribute events on behalf of a :class:`.MapperProperty`
@@ -71,9 +78,9 @@ class QueryableAttribute(
 
         :class:`.MapperProperty`
 
-        :attr:`.Mapper.all_orm_descriptors`
+        :attr:`_orm.Mapper.all_orm_descriptors`
 
-        :attr:`.Mapper.attrs`
+        :attr:`_orm.Mapper.attrs`
     """
 
     is_attribute = True
@@ -82,17 +89,19 @@ class QueryableAttribute(
         self,
         class_,
         key,
+        parententity,
         impl=None,
         comparator=None,
-        parententity=None,
         of_type=None,
+        extra_criteria=(),
     ):
         self.class_ = class_
         self.key = key
+        self._parententity = parententity
         self.impl = impl
         self.comparator = comparator
-        self._parententity = parententity
         self._of_type = of_type
+        self._extra_criteria = extra_criteria
 
         manager = manager_of_class(class_)
         # manager is None in the case of AliasedClass
@@ -106,11 +115,24 @@ class QueryableAttribute(
                         self.dispatch._active_history = True
 
     _cache_key_traversal = [
-        # ("class_", visitors.ExtendedInternalTraversal.dp_plain_obj),
         ("key", visitors.ExtendedInternalTraversal.dp_string),
         ("_parententity", visitors.ExtendedInternalTraversal.dp_multi),
         ("_of_type", visitors.ExtendedInternalTraversal.dp_multi),
+        ("_extra_criteria", visitors.InternalTraversal.dp_clauseelement_list),
     ]
+
+    def __reduce__(self):
+        # this method is only used in terms of the
+        # sqlalchemy.ext.serializer extension
+        return (
+            _queryable_attribute_unreduce,
+            (
+                self.key,
+                self._parententity.mapper.class_,
+                self._parententity,
+                self._parententity.entity,
+            ),
+        )
 
     @util.memoized_property
     def _supports_population(self):
@@ -133,12 +155,13 @@ class QueryableAttribute(
 
         * If the attribute is a column-mapped property, i.e.
           :class:`.ColumnProperty`, which is mapped directly
-          to a schema-level :class:`.Column` object, this attribute
+          to a schema-level :class:`_schema.Column` object, this attribute
           will return the :attr:`.SchemaItem.info` dictionary associated
-          with the core-level :class:`.Column` object.
+          with the core-level :class:`_schema.Column` object.
 
         * If the attribute is a :class:`.ColumnProperty` but is mapped to
-          any other kind of SQL expression other than a :class:`.Column`,
+          any other kind of SQL expression other than a
+          :class:`_schema.Column`,
           the attribute will refer to the :attr:`.MapperProperty.info`
           dictionary associated directly with the :class:`.ColumnProperty`,
           assuming the SQL expression itself does not have its own ``.info``
@@ -153,7 +176,7 @@ class QueryableAttribute(
         * To access the :attr:`.MapperProperty.info` dictionary of the
           :class:`.MapperProperty` unconditionally, including for a
           :class:`.ColumnProperty` that's associated directly with a
-          :class:`.schema.Column`, the attribute can be referred to using
+          :class:`_schema.Column`, the attribute can be referred to using
           :attr:`.QueryableAttribute.property` attribute, as
           ``MyClass.someattribute.property.info``.
 
@@ -170,7 +193,7 @@ class QueryableAttribute(
     def parent(self):
         """Return an inspection instance representing the parent.
 
-        This will be either an instance of :class:`.Mapper`
+        This will be either an instance of :class:`_orm.Mapper`
         or :class:`.AliasedInsp`, depending upon the nature
         of the parent entity which this attribute is associated
         with.
@@ -180,9 +203,21 @@ class QueryableAttribute(
 
     @util.memoized_property
     def expression(self):
+        """The SQL expression object represented by this
+        :class:`.QueryableAttribute`.
+
+        This will typically be an instance of a :class:`_sql.ColumnElement`
+        subclass representing a column expression.
+
+        """
+
         return self.comparator.__clause_element__()._annotate(
-            {"orm_key": self.key}
+            {"proxy_key": self.key, "entity_namespace": self._entity_namespace}
         )
+
+    @property
+    def _entity_namespace(self):
+        return self._parententity
 
     @property
     def _annotations(self):
@@ -190,6 +225,10 @@ class QueryableAttribute(
 
     def __clause_element__(self):
         return self.expression
+
+    @property
+    def _from_objects(self):
+        return self.expression._from_objects
 
     def _bulk_update_tuples(self, value):
         """Return setter tuples for a bulk UPDATE."""
@@ -206,14 +245,37 @@ class QueryableAttribute(
             parententity=adapt_to_entity,
         )
 
-    def of_type(self, cls):
+    def of_type(self, entity):
         return QueryableAttribute(
             self.class_,
             self.key,
-            self.impl,
-            self.comparator.of_type(cls),
             self._parententity,
-            of_type=cls,
+            impl=self.impl,
+            comparator=self.comparator.of_type(entity),
+            of_type=inspection.inspect(entity),
+            extra_criteria=self._extra_criteria,
+        )
+
+    def and_(self, *other):
+        return QueryableAttribute(
+            self.class_,
+            self.key,
+            self._parententity,
+            impl=self.impl,
+            comparator=self.comparator.and_(*other),
+            of_type=self._of_type,
+            extra_criteria=self._extra_criteria + other,
+        )
+
+    def _clone(self, **kw):
+        return QueryableAttribute(
+            self.class_,
+            self.key,
+            self._parententity,
+            impl=self.impl,
+            comparator=self.comparator,
+            of_type=self._of_type,
+            extra_criteria=self._extra_criteria,
         )
 
     def label(self, name):
@@ -231,16 +293,19 @@ class QueryableAttribute(
     def __getattr__(self, key):
         try:
             return getattr(self.comparator, key)
-        except AttributeError:
-            raise AttributeError(
-                "Neither %r object nor %r object associated with %s "
-                "has an attribute %r"
-                % (
-                    type(self).__name__,
-                    type(self.comparator).__name__,
-                    self,
-                    key,
-                )
+        except AttributeError as err:
+            util.raise_(
+                AttributeError(
+                    "Neither %r object nor %r object associated with %s "
+                    "has an attribute %r"
+                    % (
+                        type(self).__name__,
+                        type(self.comparator).__name__,
+                        self,
+                        key,
+                    )
+                ),
+                replace_context=err,
             )
 
     def __str__(self):
@@ -260,6 +325,15 @@ class QueryableAttribute(
         return self.comparator.property
 
 
+def _queryable_attribute_unreduce(key, mapped_class, parententity, entity):
+    # this method is only used in terms of the
+    # sqlalchemy.ext.serializer extension
+    if parententity.is_aliased_class:
+        return entity._get_from_serialized(key, mapped_class, parententity)
+    else:
+        return getattr(entity, key)
+
+
 class InstrumentedAttribute(QueryableAttribute):
     """Class bound instrumented attribute which adds basic
     :term:`descriptor` methods.
@@ -268,6 +342,8 @@ class InstrumentedAttribute(QueryableAttribute):
 
 
     """
+
+    inherit_cache = True
 
     def __set__(self, instance, value):
         self.impl.set(
@@ -285,7 +361,19 @@ class InstrumentedAttribute(QueryableAttribute):
         if self._supports_population and self.key in dict_:
             return dict_[self.key]
         else:
-            return self.impl.get(instance_state(instance), dict_)
+            try:
+                state = instance_state(instance)
+            except AttributeError as err:
+                util.raise_(
+                    orm_exc.UnmappedInstanceError(instance),
+                    replace_context=err,
+                )
+            return self.impl.get(state, dict_)
+
+
+HasEntityNamespace = util.namedtuple(
+    "HasEntityNamespace", ["entity_namespace"]
+)
 
 
 def create_proxied_attribute(descriptor):
@@ -333,6 +421,15 @@ def create_proxied_attribute(descriptor):
             )
 
         @property
+        def _entity_namespace(self):
+            if hasattr(self._comparator, "_parententity"):
+                return self._comparator._parententity
+            else:
+                # used by hybrid attributes which try to remain
+                # agnostic of any ORM concepts like mappers
+                return HasEntityNamespace(self.class_)
+
+        @property
         def property(self):
             return self.comparator.property
 
@@ -373,31 +470,39 @@ def create_proxied_attribute(descriptor):
             comparator."""
             try:
                 return getattr(descriptor, attribute)
-            except AttributeError:
+            except AttributeError as err:
                 if attribute == "comparator":
-                    raise AttributeError("comparator")
+                    util.raise_(
+                        AttributeError("comparator"), replace_context=err
+                    )
                 try:
                     # comparator itself might be unreachable
                     comparator = self.comparator
-                except AttributeError:
-                    raise AttributeError(
-                        "Neither %r object nor unconfigured comparator "
-                        "object associated with %s has an attribute %r"
-                        % (type(descriptor).__name__, self, attribute)
+                except AttributeError as err2:
+                    util.raise_(
+                        AttributeError(
+                            "Neither %r object nor unconfigured comparator "
+                            "object associated with %s has an attribute %r"
+                            % (type(descriptor).__name__, self, attribute)
+                        ),
+                        replace_context=err2,
                     )
                 else:
                     try:
                         return getattr(comparator, attribute)
-                    except AttributeError:
-                        raise AttributeError(
-                            "Neither %r object nor %r object "
-                            "associated with %s has an attribute %r"
-                            % (
-                                type(descriptor).__name__,
-                                type(comparator).__name__,
-                                self,
-                                attribute,
-                            )
+                    except AttributeError as err3:
+                        util.raise_(
+                            AttributeError(
+                                "Neither %r object nor %r object "
+                                "associated with %s has an attribute %r"
+                                % (
+                                    type(descriptor).__name__,
+                                    type(comparator).__name__,
+                                    self,
+                                    attribute,
+                                )
+                            ),
+                            replace_context=err3,
                         )
 
     Proxy.__name__ = type(descriptor).__name__ + "Proxy"
@@ -415,7 +520,7 @@ OP_BULK_REPLACE = util.symbol("BULK_REPLACE")
 OP_MODIFIED = util.symbol("MODIFIED")
 
 
-class Event(object):
+class AttributeEvent(object):
     """A token propagated throughout the course of a chain of attribute
     events.
 
@@ -434,10 +539,10 @@ class Event(object):
 
     .. versionadded:: 0.9.0
 
-    :var impl: The :class:`.AttributeImpl` which is the current event
+    :attribute impl: The :class:`.AttributeImpl` which is the current event
      initiator.
 
-    :var op: The symbol :attr:`.OP_APPEND`, :attr:`.OP_REMOVE`,
+    :attribute op: The symbol :attr:`.OP_APPEND`, :attr:`.OP_REMOVE`,
      :attr:`.OP_REPLACE`, or :attr:`.OP_BULK_REPLACE`, indicating the
      source operation.
 
@@ -452,7 +557,7 @@ class Event(object):
 
     def __eq__(self, other):
         return (
-            isinstance(other, Event)
+            isinstance(other, AttributeEvent)
             and other.impl is self.impl
             and other.op == self.op
         )
@@ -463,6 +568,9 @@ class Event(object):
 
     def hasparent(self, state):
         return self.impl.hasparent(state)
+
+
+Event = AttributeEvent
 
 
 class AttributeImpl(object):
@@ -713,12 +821,15 @@ class AttributeImpl(object):
                 elif value is ATTR_WAS_SET:
                     try:
                         return dict_[key]
-                    except KeyError:
+                    except KeyError as err:
                         # TODO: no test coverage here.
-                        raise KeyError(
-                            "Deferred loader for attribute "
-                            "%r failed to populate "
-                            "correctly" % key
+                        util.raise_(
+                            KeyError(
+                                "Deferred loader for attribute "
+                                "%r failed to populate "
+                                "correctly" % key
+                            ),
+                            replace_context=err,
                         )
                 elif value is not ATTR_EMPTY:
                     return self.set_committed_value(state, dict_, value)
@@ -868,9 +979,9 @@ class ScalarAttributeImpl(AttributeImpl):
 
 class ScalarObjectAttributeImpl(ScalarAttributeImpl):
     """represents a scalar-holding InstrumentedAttribute,
-       where the target object is also instrumented.
+    where the target object is also instrumented.
 
-       Adds events to delete/set operations.
+    Adds events to delete/set operations.
 
     """
 
@@ -965,9 +1076,7 @@ class ScalarObjectAttributeImpl(ScalarAttributeImpl):
         check_old=None,
         pop=False,
     ):
-        """Set a value on the given InstanceState.
-
-        """
+        """Set a value on the given InstanceState."""
         if self.dispatch._active_history:
             old = self.get(
                 state,
@@ -1593,7 +1702,7 @@ class History(util.namedtuple("History", ["added", "unchanged", "deleted"])):
     attribute.
 
     The easiest way to get a :class:`.History` object for a particular
-    attribute on an object is to use the :func:`.inspect` function::
+    attribute on an object is to use the :func:`_sa.inspect` function::
 
         from sqlalchemy import inspect
 
@@ -1796,18 +1905,6 @@ def get_history(obj, key, passive=PASSIVE_OFF):
         using loader callables if the value is not locally present.
 
     """
-    if passive is True:
-        util.warn_deprecated(
-            "Passing True for 'passive' is deprecated. "
-            "Use attributes.PASSIVE_NO_INITIALIZE"
-        )
-        passive = PASSIVE_NO_INITIALIZE
-    elif passive is False:
-        util.warn_deprecated(
-            "Passing False for 'passive' is "
-            "deprecated.  Use attributes.PASSIVE_OFF"
-        )
-        passive = PASSIVE_OFF
 
     return get_state_history(instance_state(obj), key, passive)
 

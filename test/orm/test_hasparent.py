@@ -1,6 +1,5 @@
 """test the current state of the hasparent() flag."""
 
-
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import testing
@@ -8,10 +7,10 @@ from sqlalchemy.orm import attributes
 from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.testing.util import gc_collect
@@ -83,7 +82,7 @@ class ParentRemovalTest(fixtures.MappedTest):
     def _fixture(self):
         User, Address = self.classes.User, self.classes.Address
 
-        s = Session()
+        s = fixture_session()
 
         u1 = User()
         a1 = Address()
@@ -132,6 +131,7 @@ class ParentRemovalTest(fixtures.MappedTest):
         s, u1, a1 = self._fixture()
 
         s._expunge_states([attributes.instance_state(u1)])
+
         del u1
         gc_collect()
 
@@ -140,8 +140,9 @@ class ParentRemovalTest(fixtures.MappedTest):
         # primary key change.  now we
         # can't rely on state.key as the
         # identifier.
-        u1.id = 5
-        a1.user_id = 5
+        new_id = u1.id + 10
+        u1.id = new_id
+        a1.user_id = new_id
         s.flush()
 
         assert_raises_message(

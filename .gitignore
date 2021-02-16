@@ -5,6 +5,7 @@
 /build/
 /dist/
 /doc/build/output/
+/doc/build/_build/
 /dogpile_data/
 *.orig
 *,cover
@@ -19,11 +20,8 @@ coverage.xml
 *.so
 *.patch
 sqlnet.log
-/mapping_setup.py
 /shard?_*.db
 /test.cfg
-/test.py
-/test?.py
 /.cache/
 /.mypy_cache
 *.sw[o,p]
@@ -37,3 +35,6 @@ test/test_schema.db
 /.vscode/
 /.ipynb_checkpoints/
 *.ipynb
+/querytest.db
+/.mypy_cache
+/.pytest_cache

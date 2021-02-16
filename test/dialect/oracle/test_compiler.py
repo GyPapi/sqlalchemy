@@ -6,6 +6,7 @@ from sqlalchemy import exc
 from sqlalchemy import except_
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
+from sqlalchemy import Identity
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import literal
@@ -27,8 +28,10 @@ from sqlalchemy.dialects.oracle import base as oracle
 from sqlalchemy.dialects.oracle import cx_oracle
 from sqlalchemy.engine import default
 from sqlalchemy.sql import column
+from sqlalchemy.sql import ddl
 from sqlalchemy.sql import quoted_name
 from sqlalchemy.sql import table
+from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
@@ -67,8 +70,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_subquery(self):
         t = table("sometable", column("col1"), column("col2"))
-        s = select([t]).subquery()
-        s = select([s.c.col1, s.c.col2])
+        s = select(t).subquery()
+        s = select(s.c.col1, s.c.col2)
 
         self.assert_compile(
             s,
@@ -107,7 +110,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
         included_parts = (
-            select([part.c.sub_part, part.c.part, part.c.quantity])
+            select(part.c.sub_part, part.c.part, part.c.quantity)
             .where(part.c.part == "p1")
             .cte(name="included_parts", recursive=True)
             .suffix_with(
@@ -121,19 +124,15 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         parts_alias = part.alias("p")
         included_parts = included_parts.union_all(
             select(
-                [
-                    parts_alias.c.sub_part,
-                    parts_alias.c.part,
-                    parts_alias.c.quantity,
-                ]
+                parts_alias.c.sub_part,
+                parts_alias.c.part,
+                parts_alias.c.quantity,
             ).where(parts_alias.c.part == incl_alias.c.sub_part)
         )
 
         q = select(
-            [
-                included_parts.c.sub_part,
-                func.sum(included_parts.c.quantity).label("total_quantity"),
-            ]
+            included_parts.c.sub_part,
+            func.sum(included_parts.c.quantity).label("total_quantity"),
         ).group_by(included_parts.c.sub_part)
 
         self.assert_compile(
@@ -153,10 +152,10 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_limit_one(self):
         t = table("sometable", column("col1"), column("col2"))
-        s = select([t])
+        s = select(t)
         c = s.compile(dialect=oracle.OracleDialect())
         assert t.c.col1 in set(c._create_result_map()["col1"][1])
-        s = select([t]).limit(10).offset(20)
+        s = select(t).limit(10).offset(20)
         self.assert_compile(
             s,
             "SELECT anon_1.col1, anon_1.col2 FROM "
@@ -175,8 +174,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_limit_one_firstrows(self):
         t = table("sometable", column("col1"), column("col2"))
-        s = select([t])
-        s = select([t]).limit(10).offset(20)
+        s = select(t)
+        s = select(t).limit(10).offset(20)
         self.assert_compile(
             s,
             "SELECT anon_1.col1, anon_1.col2 FROM "
@@ -193,9 +192,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_limit_two(self):
         t = table("sometable", column("col1"), column("col2"))
-        s = select([t]).limit(10).offset(20).subquery()
+        s = select(t).limit(10).offset(20).subquery()
 
-        s2 = select([s.c.col1, s.c.col2])
+        s2 = select(s.c.col1, s.c.col2)
         self.assert_compile(
             s2,
             "SELECT anon_1.col1, anon_1.col2 FROM "
@@ -229,7 +228,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_three(self):
         t = table("sometable", column("col1"), column("col2"))
 
-        s = select([t]).limit(10).offset(20).order_by(t.c.col2)
+        s = select(t).limit(10).offset(20).order_by(t.c.col2)
         self.assert_compile(
             s,
             "SELECT anon_1.col1, anon_1.col2 FROM "
@@ -249,7 +248,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_four(self):
         t = table("sometable", column("col1"), column("col2"))
 
-        s = select([t]).with_for_update().limit(10).order_by(t.c.col2)
+        s = select(t).with_for_update().limit(10).order_by(t.c.col2)
         self.assert_compile(
             s,
             "SELECT anon_1.col1, anon_1.col2 FROM (SELECT "
@@ -263,7 +262,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_four_firstrows(self):
         t = table("sometable", column("col1"), column("col2"))
 
-        s = select([t]).with_for_update().limit(10).order_by(t.c.col2)
+        s = select(t).with_for_update().limit(10).order_by(t.c.col2)
         self.assert_compile(
             s,
             "SELECT /*+ FIRST_ROWS([POSTCOMPILE_ora_frow_1]) */ "
@@ -279,13 +278,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_five(self):
         t = table("sometable", column("col1"), column("col2"))
 
-        s = (
-            select([t])
-            .with_for_update()
-            .limit(10)
-            .offset(20)
-            .order_by(t.c.col2)
-        )
+        s = select(t).with_for_update().limit(10).offset(20).order_by(t.c.col2)
         self.assert_compile(
             s,
             "SELECT anon_1.col1, anon_1.col2 FROM "
@@ -304,7 +297,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         t = table("sometable", column("col1"), column("col2"))
 
         s = (
-            select([t])
+            select(t)
             .limit(10)
             .offset(literal(10) + literal(20))
             .order_by(t.c.col2)
@@ -330,7 +323,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         col = literal_column("SUM(ABC)").label("SUM(ABC)")
         tbl = table("my_table")
-        query = select([col]).select_from(tbl).order_by(col).limit(100)
+        query = select(col).select_from(tbl).order_by(col).limit(100)
 
         self.assert_compile(
             query,
@@ -342,7 +335,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         col = literal_column("SUM(ABC)").label(quoted_name("SUM(ABC)", True))
         tbl = table("my_table")
-        query = select([col]).select_from(tbl).order_by(col).limit(100)
+        query = select(col).select_from(tbl).order_by(col).limit(100)
 
         self.assert_compile(
             query,
@@ -354,7 +347,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         col = literal_column("SUM(ABC)").label("SUM(ABC)_")
         tbl = table("my_table")
-        query = select([col]).select_from(tbl).order_by(col).limit(100)
+        query = select(col).select_from(tbl).order_by(col).limit(100)
 
         self.assert_compile(
             query,
@@ -366,7 +359,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         col = literal_column("SUM(ABC)").label(quoted_name("SUM(ABC)_", True))
         tbl = table("my_table")
-        query = select([col]).select_from(tbl).order_by(col).limit(100)
+        query = select(col).select_from(tbl).order_by(col).limit(100)
 
         self.assert_compile(
             query,
@@ -456,11 +449,29 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "mytable_1.myid, mytable_1.name",
         )
 
+        # ensure of=text() for of works
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                read=True, of=text("table1")
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = :myid_1 FOR UPDATE OF table1",
+        )
+
+        # ensure of=literal_column() for of works
+        self.assert_compile(
+            table1.select(table1.c.myid == 7).with_for_update(
+                read=True, of=literal_column("table1")
+            ),
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable WHERE mytable.myid = :myid_1 FOR UPDATE OF table1",
+        )
+
     def test_for_update_of_w_limit_adaption_col_present(self):
         table1 = table("mytable", column("myid"), column("name"))
 
         self.assert_compile(
-            select([table1.c.myid, table1.c.name])
+            select(table1.c.myid, table1.c.name)
             .where(table1.c.myid == 7)
             .with_for_update(nowait=True, of=table1.c.name)
             .limit(10),
@@ -476,7 +487,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         table1 = table("mytable", column("myid"), column("name"))
 
         self.assert_compile(
-            select([table1.c.myid])
+            select(table1.c.myid)
             .where(table1.c.myid == 7)
             .with_for_update(nowait=True, of=table1.c.name)
             .limit(10),
@@ -491,7 +502,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         table1 = table("mytable", column("myid"), column("name"))
 
         self.assert_compile(
-            select([table1.c.myid, table1.c.name])
+            select(table1.c.myid, table1.c.name)
             .where(table1.c.myid == 7)
             .with_for_update(nowait=True, of=table1.c.name)
             .limit(10)
@@ -511,7 +522,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         table1 = table("mytable", column("myid"), column("name"))
 
         self.assert_compile(
-            select([table1.c.myid])
+            select(table1.c.myid)
             .where(table1.c.myid == 7)
             .with_for_update(nowait=True, of=table1.c.name)
             .limit(10)
@@ -530,7 +541,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         table1 = table("mytable", column("myid"), column("foo"), column("bar"))
 
         self.assert_compile(
-            select([table1.c.myid, table1.c.bar])
+            select(table1.c.myid, table1.c.bar)
             .where(table1.c.myid == 7)
             .with_for_update(nowait=True, of=[table1.c.foo, table1.c.bar])
             .limit(10)
@@ -551,10 +562,10 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         class MyType(TypeDecorator):
             impl = Integer
 
-        stmt = select([type_coerce(column("x"), MyType).label("foo")]).limit(1)
+        stmt = select(type_coerce(column("x"), MyType).label("foo")).limit(1)
         dialect = oracle.dialect()
         compiled = stmt.compile(dialect=dialect)
-        assert isinstance(compiled._create_result_map()["foo"][-1], MyType)
+        assert isinstance(compiled._create_result_map()["foo"][-2], MyType)
 
     def test_use_binds_for_limits_disabled_one(self):
         t = table("sometable", column("col1"), column("col2"))
@@ -565,7 +576,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect = oracle.OracleDialect(use_binds_for_limits=False)
 
         self.assert_compile(
-            select([t]).limit(10),
+            select(t).limit(10),
             "SELECT anon_1.col1, anon_1.col2 FROM "
             "(SELECT sometable.col1 AS col1, "
             "sometable.col2 AS col2 FROM sometable) anon_1 "
@@ -582,7 +593,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect = oracle.OracleDialect(use_binds_for_limits=False)
 
         self.assert_compile(
-            select([t]).offset(10),
+            select(t).offset(10),
             "SELECT anon_1.col1, anon_1.col2 FROM (SELECT "
             "anon_2.col1 AS col1, anon_2.col2 AS col2, ROWNUM AS ora_rn "
             "FROM (SELECT sometable.col1 AS col1, sometable.col2 AS col2 "
@@ -600,7 +611,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect = oracle.OracleDialect(use_binds_for_limits=False)
 
         self.assert_compile(
-            select([t]).limit(10).offset(10),
+            select(t).limit(10).offset(10),
             "SELECT anon_1.col1, anon_1.col2 FROM (SELECT "
             "anon_2.col1 AS col1, anon_2.col2 AS col2, ROWNUM AS ora_rn "
             "FROM (SELECT sometable.col1 AS col1, sometable.col2 AS col2 "
@@ -619,7 +630,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect = oracle.OracleDialect(use_binds_for_limits=True)
 
         self.assert_compile(
-            select([t]).limit(10),
+            select(t).limit(10),
             "SELECT anon_1.col1, anon_1.col2 FROM "
             "(SELECT sometable.col1 AS col1, "
             "sometable.col2 AS col2 FROM sometable) anon_1 WHERE ROWNUM "
@@ -636,7 +647,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect = oracle.OracleDialect(use_binds_for_limits=True)
 
         self.assert_compile(
-            select([t]).offset(10),
+            select(t).offset(10),
             "SELECT anon_1.col1, anon_1.col2 FROM "
             "(SELECT anon_2.col1 AS col1, anon_2.col2 AS col2, "
             "ROWNUM AS ora_rn "
@@ -655,7 +666,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect = oracle.OracleDialect(use_binds_for_limits=True)
 
         self.assert_compile(
-            select([t]).limit(10).offset(10),
+            select(t).limit(10).offset(10),
             "SELECT anon_1.col1, anon_1.col2 FROM "
             "(SELECT anon_2.col1 AS col1, anon_2.col2 AS col2, "
             "ROWNUM AS ora_rn "
@@ -694,9 +705,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         anon = a_table.alias()
         self.assert_compile(
-            select([other_table, anon])
+            select(other_table, anon)
             .select_from(other_table.outerjoin(anon))
-            .apply_labels(),
+            .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             "SELECT other_thirty_characters_table_.id "
             "AS other_thirty_characters__1, "
             "other_thirty_characters_table_.thirty_char"
@@ -712,9 +723,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect=dialect,
         )
         self.assert_compile(
-            select([other_table, anon])
+            select(other_table, anon)
             .select_from(other_table.outerjoin(anon))
-            .apply_labels(),
+            .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             "SELECT other_thirty_characters_table_.id "
             "AS other_thirty_characters__1, "
             "other_thirty_characters_table_.thirty_char"
@@ -754,17 +765,19 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_outer_join_one(self):
         table1, table2, table3 = self._test_outer_join_fixture()
 
-        query = select(
-            [table1, table2],
-            or_(
-                table1.c.name == "fred",
-                table1.c.myid == 10,
-                table2.c.othername != "jack",
-                text("EXISTS (select yay from foo where boo = lar)"),
-            ),
-            from_obj=[
+        query = (
+            select(table1, table2)
+            .where(
+                or_(
+                    table1.c.name == "fred",
+                    table1.c.myid == 10,
+                    table2.c.othername != "jack",
+                    text("EXISTS (select yay from foo where boo = lar)"),
+                )
+            )
+            .select_from(
                 outerjoin(table1, table2, table1.c.myid == table2.c.otherid)
-            ],
+            )
         )
         self.assert_compile(
             query,
@@ -872,13 +885,13 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         table1, table2, table3 = self._test_outer_join_fixture()
 
         subq = (
-            select([table1])
+            select(table1)
             .select_from(
                 table1.outerjoin(table2, table1.c.myid == table2.c.otherid)
             )
             .alias()
         )
-        q = select([table3]).select_from(
+        q = select(table3).select_from(
             table3.outerjoin(subq, table3.c.userid == subq.c.myid)
         )
 
@@ -911,7 +924,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_outer_join_seven(self):
         table1, table2, table3 = self._test_outer_join_fixture()
 
-        q = select([table1.c.name]).where(table1.c.name == "foo")
+        q = select(table1.c.name).where(table1.c.name == "foo")
         self.assert_compile(
             q,
             "SELECT mytable.name FROM mytable WHERE " "mytable.name = :name_1",
@@ -921,11 +934,11 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_outer_join_eight(self):
         table1, table2, table3 = self._test_outer_join_fixture()
         subq = (
-            select([table3.c.otherstuff])
+            select(table3.c.otherstuff)
             .where(table3.c.otherstuff == table1.c.name)
             .label("bar")
         )
-        q = select([table1.c.name, subq])
+        q = select(table1.c.name, subq)
         self.assert_compile(
             q,
             "SELECT mytable.name, (SELECT "
@@ -949,7 +962,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             column("othername", String),
         )
 
-        stmt = select([table1]).select_from(
+        stmt = select(table1).select_from(
             table1.outerjoin(
                 table2,
                 and_(
@@ -968,7 +981,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect=oracle.dialect(use_ansi=False),
         )
 
-        stmt = select([table1]).select_from(
+        stmt = select(table1).select_from(
             table1.outerjoin(
                 table2,
                 and_(
@@ -995,7 +1008,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         j = a.join(b.join(c, b.c.b == c.c.c), a.c.a == b.c.b)
 
         self.assert_compile(
-            select([j]),
+            select(j),
             "SELECT a.a, b.b, c.c FROM a, b, c "
             "WHERE a.a = b.b AND b.b = c.c",
             dialect=oracle.OracleDialect(use_ansi=False),
@@ -1004,7 +1017,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         j = a.outerjoin(b.join(c, b.c.b == c.c.c), a.c.a == b.c.b)
 
         self.assert_compile(
-            select([j]),
+            select(j),
             "SELECT a.a, b.b, c.c FROM a, b, c "
             "WHERE a.a = b.b(+) AND b.b = c.c",
             dialect=oracle.OracleDialect(use_ansi=False),
@@ -1013,7 +1026,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         j = a.join(b.outerjoin(c, b.c.b == c.c.c), a.c.a == b.c.b)
 
         self.assert_compile(
-            select([j]),
+            select(j),
             "SELECT a.a, b.b, c.c FROM a, b, c "
             "WHERE a.a = b.b AND b.b = c.c(+)",
             dialect=oracle.OracleDialect(use_ansi=False),
@@ -1030,7 +1043,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
         at_alias = address_types.alias()
         s = (
-            select([at_alias, addresses])
+            select(at_alias, addresses)
             .select_from(
                 addresses.outerjoin(
                     at_alias, addresses.c.address_type_id == at_alias.c.id
@@ -1042,7 +1055,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             s,
             "SELECT address_types_1.id, "
-            "address_types_1.name, addresses.id, "
+            "address_types_1.name, addresses.id AS id_1, "
             "addresses.user_id, addresses.address_type_"
             "id, addresses.email_address FROM "
             "addresses LEFT OUTER JOIN address_types "
@@ -1070,8 +1083,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(
             compiled._create_result_map(),
             {
-                "c3": ("c3", (t1.c.c3, "c3", "c3"), t1.c.c3.type),
-                "lower": ("lower", (fn, "lower", None), fn.type),
+                "c3": ("c3", (t1.c.c3, "c3", "c3"), t1.c.c3.type, 1),
+                "lower": ("lower", (fn, "lower", None), fn.type, 0),
             },
         )
 
@@ -1259,6 +1272,57 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect=oracle.dialect(),
         )
 
+    def test_column_identity(self):
+        # all other tests are in test_identity_column.py
+        m = MetaData()
+        t = Table(
+            "t",
+            m,
+            Column(
+                "y",
+                Integer,
+                Identity(
+                    always=True,
+                    start=4,
+                    increment=7,
+                    nominvalue=True,
+                    nomaxvalue=True,
+                    cycle=False,
+                    order=False,
+                ),
+            ),
+        )
+        self.assert_compile(
+            schema.CreateTable(t),
+            "CREATE TABLE t (y INTEGER GENERATED ALWAYS AS IDENTITY "
+            "(INCREMENT BY 7 START WITH 4 NOMINVALUE NOMAXVALUE "
+            "NOORDER NOCYCLE))",
+        )
+
+    def test_column_identity_no_generated(self):
+        m = MetaData()
+        t = Table("t", m, Column("y", Integer, Identity(always=None)))
+        self.assert_compile(
+            schema.CreateTable(t),
+            "CREATE TABLE t (y INTEGER GENERATED  AS IDENTITY)",
+        )
+
+    @testing.combinations(
+        (True, True, "ALWAYS ON NULL"),  # this would error when executed
+        (False, None, "BY DEFAULT"),
+        (False, False, "BY DEFAULT"),
+        (False, True, "BY DEFAULT ON NULL"),
+    )
+    def test_column_identity_on_null(self, always, on_null, text):
+        m = MetaData()
+        t = Table(
+            "t", m, Column("y", Integer, Identity(always, on_null=on_null))
+        )
+        self.assert_compile(
+            schema.CreateTable(t),
+            "CREATE TABLE t (y INTEGER GENERATED %s AS IDENTITY)" % text,
+        )
+
 
 class SequenceTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_basic(self):
@@ -1277,4 +1341,175 @@ class SequenceTest(fixtures.TestBase, AssertsCompiledSQL):
         assert (
             dialect.identifier_preparer.format_sequence(seq)
             == '"Some_Schema"."My_Seq"'
+        )
+
+    def test_compile(self):
+        self.assert_compile(
+            ddl.CreateSequence(
+                Sequence("my_seq", nomaxvalue=True, nominvalue=True)
+            ),
+            "CREATE SEQUENCE my_seq START WITH 1 NOMINVALUE NOMAXVALUE",
+            dialect=oracle.OracleDialect(),
+        )
+
+
+class RegexpTest(fixtures.TestBase, testing.AssertsCompiledSQL):
+    __dialect__ = "oracle"
+
+    def setup_test(self):
+        self.table = table(
+            "mytable", column("myid", Integer), column("name", String)
+        )
+
+    def test_regexp_match(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match("pattern"),
+            "REGEXP_LIKE(mytable.myid, :myid_1)",
+            checkparams={"myid_1": "pattern"},
+        )
+
+    def test_regexp_match_column(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match(self.table.c.name),
+            "REGEXP_LIKE(mytable.myid, mytable.name)",
+            checkparams={},
+        )
+
+    def test_regexp_match_str(self):
+        self.assert_compile(
+            literal("string").regexp_match(self.table.c.name),
+            "REGEXP_LIKE(:param_1, mytable.name)",
+            checkparams={"param_1": "string"},
+        )
+
+    def test_regexp_match_flags(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match("pattern", flags="ig"),
+            "REGEXP_LIKE(mytable.myid, :myid_1, :myid_2)",
+            checkparams={"myid_1": "pattern", "myid_2": "ig"},
+        )
+
+    def test_regexp_match_flags_col(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match("pattern", flags=self.table.c.name),
+            "REGEXP_LIKE(mytable.myid, :myid_1, mytable.name)",
+            checkparams={"myid_1": "pattern"},
+        )
+
+    def test_not_regexp_match(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match("pattern"),
+            "NOT REGEXP_LIKE(mytable.myid, :myid_1)",
+            checkparams={"myid_1": "pattern"},
+        )
+
+    def test_not_regexp_match_column(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match(self.table.c.name),
+            "NOT REGEXP_LIKE(mytable.myid, mytable.name)",
+            checkparams={},
+        )
+
+    def test_not_regexp_match_str(self):
+        self.assert_compile(
+            ~literal("string").regexp_match(self.table.c.name),
+            "NOT REGEXP_LIKE(:param_1, mytable.name)",
+            checkparams={"param_1": "string"},
+        )
+
+    def test_not_regexp_match_flags_col(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match(
+                "pattern", flags=self.table.c.name
+            ),
+            "NOT REGEXP_LIKE(mytable.myid, :myid_1, mytable.name)",
+            checkparams={"myid_1": "pattern"},
+        )
+
+    def test_not_regexp_match_flags(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match("pattern", flags="ig"),
+            "NOT REGEXP_LIKE(mytable.myid, :myid_1, :myid_2)",
+            checkparams={"myid_1": "pattern", "myid_2": "ig"},
+        )
+
+    def test_regexp_replace(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace("pattern", "replacement"),
+            "REGEXP_REPLACE(mytable.myid, :myid_1, :myid_2)",
+            checkparams={"myid_1": "pattern", "myid_2": "replacement"},
+        )
+
+    def test_regexp_replace_column(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace("pattern", self.table.c.name),
+            "REGEXP_REPLACE(mytable.myid, :myid_1, mytable.name)",
+            checkparams={"myid_1": "pattern"},
+        )
+
+    def test_regexp_replace_column2(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace(self.table.c.name, "replacement"),
+            "REGEXP_REPLACE(mytable.myid, mytable.name, :myid_1)",
+            checkparams={"myid_1": "replacement"},
+        )
+
+    def test_regexp_replace_string(self):
+        self.assert_compile(
+            literal("string").regexp_replace("pattern", self.table.c.name),
+            "REGEXP_REPLACE(:param_1, :param_2, mytable.name)",
+            checkparams={"param_2": "pattern", "param_1": "string"},
+        )
+
+    def test_regexp_replace_flags(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace(
+                "pattern", "replacement", flags="ig"
+            ),
+            "REGEXP_REPLACE(mytable.myid, :myid_1, :myid_3, :myid_2)",
+            checkparams={
+                "myid_1": "pattern",
+                "myid_3": "replacement",
+                "myid_2": "ig",
+            },
+        )
+
+    def test_regexp_replace_flags_col(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace(
+                "pattern", "replacement", flags=self.table.c.name
+            ),
+            "REGEXP_REPLACE(mytable.myid, :myid_1, :myid_2, mytable.name)",
+            checkparams={"myid_1": "pattern", "myid_2": "replacement"},
+        )
+
+
+class TableValuedFunctionTest(fixtures.TestBase, testing.AssertsCompiledSQL):
+    __dialect__ = "oracle"
+
+    def test_scalar_alias_column(self):
+        fn = func.scalar_strings(5)
+        stmt = select(fn.alias().column)
+        self.assert_compile(
+            stmt,
+            "SELECT COLUMN_VALUE anon_1 "
+            "FROM TABLE (scalar_strings(:scalar_strings_1)) anon_1",
+        )
+
+    def test_column_valued(self):
+        fn = func.scalar_strings(5)
+        stmt = select(fn.column_valued())
+        self.assert_compile(
+            stmt,
+            "SELECT COLUMN_VALUE anon_1 "
+            "FROM TABLE (scalar_strings(:scalar_strings_1)) anon_1",
+        )
+
+    def test_table_valued(self):
+        fn = func.three_pairs().table_valued("string1", "string2")
+        stmt = select(fn.c.string1, fn.c.string2)
+        self.assert_compile(
+            stmt,
+            "SELECT anon_1.string1, anon_1.string2 "
+            "FROM TABLE (three_pairs()) anon_1",
         )

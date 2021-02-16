@@ -1,16 +1,17 @@
 import sqlalchemy as sa
 from sqlalchemy import Computed
 from sqlalchemy import event
+from sqlalchemy import Identity
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
-from sqlalchemy.orm import Session
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertsql import assert_engine
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.assertsql import Conditional
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -40,6 +41,9 @@ class TriggerDefaultsTest(fixtures.MappedTest):
                 sa.schema.FetchedValue(for_update=True),
             ),
         )
+
+        dialect_name = testing.db.dialect.name
+
         for ins in (
             sa.DDL(
                 "CREATE TRIGGER dt_ins AFTER INSERT ON dt "
@@ -60,17 +64,37 @@ class TriggerDefaultsTest(fixtures.MappedTest):
                 ":NEW.col2 := 'ins'; :NEW.col4 := 'ins'; END;"
             ).execute_if(dialect="oracle"),
             sa.DDL(
+                "CREATE TRIGGER dt_ins BEFORE INSERT "
+                "ON dt "
+                "FOR EACH ROW "
+                "EXECUTE PROCEDURE my_func_ins();"
+            ).execute_if(dialect="postgresql"),
+            sa.DDL(
                 "CREATE TRIGGER dt_ins BEFORE INSERT ON dt "
                 "FOR EACH ROW BEGIN "
                 "SET NEW.col2='ins'; SET NEW.col4='ins'; END"
             ).execute_if(
                 callable_=lambda ddl, target, bind, **kw: bind.engine.name
-                not in ("oracle", "mssql", "sqlite")
+                not in ("oracle", "mssql", "sqlite", "postgresql")
             ),
         ):
-            event.listen(dt, "after_create", ins)
+            my_func_ins = sa.DDL(
+                "CREATE OR REPLACE FUNCTION my_func_ins() "
+                "RETURNS TRIGGER AS $$ "
+                "BEGIN "
+                "NEW.col2 := 'ins'; NEW.col4 := 'ins'; "
+                "RETURN NEW; "
+                "END; $$ LANGUAGE PLPGSQL"
+            ).execute_if(dialect="postgresql")
+            event.listen(dt, "after_create", my_func_ins)
 
-        event.listen(dt, "before_drop", sa.DDL("DROP TRIGGER dt_ins"))
+            event.listen(dt, "after_create", ins)
+        if dialect_name == "postgresql":
+            event.listen(
+                dt, "before_drop", sa.DDL("DROP TRIGGER dt_ins ON dt")
+            )
+        else:
+            event.listen(dt, "before_drop", sa.DDL("DROP TRIGGER dt_ins"))
 
         for up in (
             sa.DDL(
@@ -91,16 +115,34 @@ class TriggerDefaultsTest(fixtures.MappedTest):
             ).execute_if(dialect="oracle"),
             sa.DDL(
                 "CREATE TRIGGER dt_up BEFORE UPDATE ON dt "
+                "FOR EACH ROW "
+                "EXECUTE PROCEDURE my_func_up();"
+            ).execute_if(dialect="postgresql"),
+            sa.DDL(
+                "CREATE TRIGGER dt_up BEFORE UPDATE ON dt "
                 "FOR EACH ROW BEGIN "
                 "SET NEW.col3='up'; SET NEW.col4='up'; END"
             ).execute_if(
                 callable_=lambda ddl, target, bind, **kw: bind.engine.name
-                not in ("oracle", "mssql", "sqlite")
+                not in ("oracle", "mssql", "sqlite", "postgresql")
             ),
         ):
+            my_func_up = sa.DDL(
+                "CREATE OR REPLACE FUNCTION my_func_up() "
+                "RETURNS TRIGGER AS $$ "
+                "BEGIN "
+                "NEW.col3 := 'up'; NEW.col4 := 'up'; "
+                "RETURN NEW; "
+                "END; $$ LANGUAGE PLPGSQL"
+            ).execute_if(dialect="postgresql")
+            event.listen(dt, "after_create", my_func_up)
+
             event.listen(dt, "after_create", up)
 
-        event.listen(dt, "before_drop", sa.DDL("DROP TRIGGER dt_up"))
+        if dialect_name == "postgresql":
+            event.listen(dt, "before_drop", sa.DDL("DROP TRIGGER dt_up ON dt"))
+        else:
+            event.listen(dt, "before_drop", sa.DDL("DROP TRIGGER dt_up"))
 
     @classmethod
     def setup_classes(cls):
@@ -123,7 +165,7 @@ class TriggerDefaultsTest(fixtures.MappedTest):
         eq_(d1.col3, None)
         eq_(d1.col4, None)
 
-        session = create_session()
+        session = fixture_session()
         session.add(d1)
         session.flush()
 
@@ -138,7 +180,7 @@ class TriggerDefaultsTest(fixtures.MappedTest):
 
         d1 = Default(id=1)
 
-        session = create_session()
+        session = fixture_session()
         session.add(d1)
         session.flush()
         d1.col1 = "set"
@@ -171,10 +213,10 @@ class ExcludedDefaultsTest(fixtures.MappedTest):
         mapper(Foo, dt, exclude_properties=("col1",))
 
         f1 = Foo()
-        sess = create_session()
+        sess = fixture_session()
         sess.add(f1)
         sess.flush()
-        eq_(dt.select().execute().fetchall(), [(1, "hello")])
+        eq_(sess.connection().execute(dt.select()).fetchall(), [(1, "hello")])
 
 
 class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
@@ -218,7 +260,7 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
         else:
             Thing = self.classes.ThingNoEager
 
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (Thing(id=1, foo=5), Thing(id=2, foo=10))
 
@@ -229,41 +271,69 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
             eq_(t1.bar, 5 + 42)
             eq_(t2.bar, 10 + 42)
 
-        if eager and testing.db.dialect.implicit_returning:
-            asserter.assert_(
-                CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (%(id)s, %(foo)s) "
-                    "RETURNING test.bar",
-                    [{"foo": 5, "id": 1}],
-                    dialect="postgresql",
-                ),
-                CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (%(id)s, %(foo)s) "
-                    "RETURNING test.bar",
-                    [{"foo": 10, "id": 2}],
-                    dialect="postgresql",
-                ),
+        asserter.assert_(
+            Conditional(
+                eager and testing.db.dialect.implicit_returning,
+                [
+                    Conditional(
+                        testing.db.dialect.insert_executemany_returning,
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id, foo) "
+                                "VALUES (%(id)s, %(foo)s) "
+                                "RETURNING test.bar",
+                                [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id, foo) "
+                                "VALUES (%(id)s, %(foo)s) "
+                                "RETURNING test.bar",
+                                [{"foo": 5, "id": 1}],
+                                dialect="postgresql",
+                            ),
+                            CompiledSQL(
+                                "INSERT INTO test (id, foo) "
+                                "VALUES (%(id)s, %(foo)s) "
+                                "RETURNING test.bar",
+                                [{"foo": 10, "id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                    )
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (id, foo) VALUES (:id, :foo)",
+                        [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test.bar AS test_bar FROM test "
+                        "WHERE test.id = :param_1",
+                        [{"param_1": 1}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test.bar AS test_bar FROM test "
+                        "WHERE test.id = :param_1",
+                        [{"param_1": 2}],
+                    ),
+                ],
             )
-        else:
-            asserter.assert_(
-                CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (:id, :foo)",
-                    [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
-                ),
-                CompiledSQL(
-                    "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 1}],
-                ),
-                CompiledSQL(
-                    "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 2}],
-                ),
-            )
+        )
 
     @testing.combinations(
-        (True, testing.requires.computed_columns_on_update_returning), (False,)
+        (
+            "eagerload",
+            True,
+            testing.requires.computed_columns_on_update_returning,
+        ),
+        (
+            "noneagerload",
+            False,
+        ),
+        id_="ia",
     )
     def test_update_computed(self, eager):
         if eager:
@@ -271,7 +341,7 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
         else:
             Thing = self.classes.ThingNoEager
 
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (Thing(id=1, foo=1), Thing(id=2, foo=2))
 
@@ -341,3 +411,89 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
                     [{"param_1": 2}],
                 ),
             )
+
+
+class IdentityDefaultsOnUpdateTest(fixtures.MappedTest):
+    """test that computed columns are recognized as server
+    oninsert/onupdate defaults."""
+
+    __backend__ = True
+    __requires__ = ("identity_columns",)
+    run_create_tables = "each"
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "test",
+            metadata,
+            Column("id", Integer, Identity(), primary_key=True),
+            Column("foo", Integer),
+        )
+
+    @classmethod
+    def setup_classes(cls):
+        class Thing(cls.Basic):
+            pass
+
+    @classmethod
+    def setup_mappers(cls):
+        Thing = cls.classes.Thing
+
+        mapper(Thing, cls.tables.test)
+
+    def test_insert_identity(self):
+        Thing = self.classes.Thing
+
+        s = fixture_session()
+
+        t1, t2 = (Thing(foo=5), Thing(foo=10))
+
+        s.add_all([t1, t2])
+
+        with assert_engine(testing.db) as asserter:
+            s.flush()
+            eq_(t1.id, 1)
+            eq_(t2.id, 2)
+
+        asserter.assert_(
+            Conditional(
+                testing.db.dialect.implicit_returning,
+                [
+                    Conditional(
+                        testing.db.dialect.insert_executemany_returning,
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (foo) VALUES (%(foo)s) "
+                                "RETURNING test.id",
+                                [{"foo": 5}, {"foo": 10}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (foo) VALUES (%(foo)s) "
+                                "RETURNING test.id",
+                                [{"foo": 5}],
+                                dialect="postgresql",
+                            ),
+                            CompiledSQL(
+                                "INSERT INTO test (foo) VALUES (%(foo)s) "
+                                "RETURNING test.id",
+                                [{"foo": 10}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                    )
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (foo) VALUES (:foo)",
+                        [{"foo": 5}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO test (foo) VALUES (:foo)",
+                        [{"foo": 10}],
+                    ),
+                ],
+            )
+        )

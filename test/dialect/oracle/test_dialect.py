@@ -7,6 +7,7 @@ from sqlalchemy import Computed
 from sqlalchemy import create_engine
 from sqlalchemy import exc
 from sqlalchemy import Float
+from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import literal_column
 from sqlalchemy import outparam
@@ -24,6 +25,8 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
+from sqlalchemy.testing import config
+from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import mock
@@ -65,6 +68,120 @@ class DialectTest(fixtures.TestBase):
             cx_oracle.OracleDialect_cx_oracle(dbapi=Mock())
 
 
+class DialectWBackendTest(fixtures.TestBase):
+    __backend__ = True
+    __only_on__ = "oracle"
+
+    def test_hypothetical_not_implemented_isolation_level(self):
+        engine = engines.testing_engine()
+
+        def get_isolation_level(connection):
+            raise NotImplementedError
+
+        with mock.patch.object(
+            engine.dialect, "get_isolation_level", get_isolation_level
+        ):
+            conn = engine.connect()
+
+            # for NotImplementedError we get back None.  But the
+            # cx_Oracle dialect does not raise this.
+            eq_(conn.dialect.default_isolation_level, None)
+
+            dbapi_conn = conn.connection.connection
+
+            eq_(
+                testing.db.dialect.get_isolation_level(dbapi_conn),
+                "READ COMMITTED",
+            )
+
+    def test_graceful_failure_isolation_level_not_available(self):
+        engine = engines.testing_engine()
+
+        def get_isolation_level(connection):
+            raise exc.DBAPIError(
+                "get isolation level",
+                {},
+                engine.dialect.dbapi.Error("isolation level failed"),
+            )
+
+        with mock.patch.object(
+            engine.dialect, "get_isolation_level", get_isolation_level
+        ):
+            conn = engine.connect()
+            eq_(conn.dialect.default_isolation_level, "READ COMMITTED")
+
+            # test that we can use isolation level setting and that it
+            # reverts for "real" back to READ COMMITTED even though we
+            # can't read it
+            dbapi_conn = conn.connection.connection
+
+            conn = conn.execution_options(isolation_level="SERIALIZABLE")
+            eq_(
+                testing.db.dialect.get_isolation_level(dbapi_conn),
+                "SERIALIZABLE",
+            )
+
+            conn.close()
+            eq_(
+                testing.db.dialect.get_isolation_level(dbapi_conn),
+                "READ COMMITTED",
+            )
+
+            with engine.connect() as conn:
+                assert_raises_message(
+                    exc.DBAPIError,
+                    r".*isolation level failed.*",
+                    conn.get_isolation_level,
+                )
+
+
+class DefaultSchemaNameTest(fixtures.TestBase):
+    __backend__ = True
+    __only_on__ = "oracle"
+
+    def test_default_name_is_the_user(self):
+        default_schema_name = testing.db.dialect.default_schema_name
+
+        with testing.db.connect() as conn:
+            oracles_known_default_schema_name = (
+                testing.db.dialect.normalize_name(
+                    conn.exec_driver_sql("SELECT USER FROM DUAL").scalar()
+                )
+            )
+
+        eq_(oracles_known_default_schema_name, default_schema_name)
+
+    def test_default_schema_detected(self):
+        default_schema_name = testing.db.dialect.default_schema_name
+
+        eng = engines.testing_engine()
+
+        with eng.connect() as conn:
+
+            trans = conn.begin()
+            eq_(
+                testing.db.dialect._get_default_schema_name(conn),
+                default_schema_name,
+            )
+
+            conn.exec_driver_sql(
+                "ALTER SESSION SET CURRENT_SCHEMA=%s" % config.test_schema
+            )
+
+            eq_(
+                testing.db.dialect._get_default_schema_name(conn),
+                config.test_schema,
+            )
+
+            conn.invalidate()
+            trans.rollback()
+
+            eq_(
+                testing.db.dialect._get_default_schema_name(conn),
+                default_schema_name,
+            )
+
+
 class EncodingErrorsTest(fixtures.TestBase):
     """mock test for encoding_errors.
 
@@ -103,23 +220,30 @@ class EncodingErrorsTest(fixtures.TestBase):
         )
 
     _oracle_char_combinations = testing.combinations(
-        ("STRING", cx_Oracle_STRING, False),
-        ("FIXED_CHAR", cx_Oracle_FIXED_CHAR, False),
-        ("CLOB", cx_Oracle_CLOB, True),
-        ("NCLOB", cx_Oracle_NCLOB, True),
-        argnames="cx_oracle_type,use_read",
-        id_="iaa",
+        (
+            "STRING",
+            cx_Oracle_STRING,
+        ),
+        (
+            "FIXED_CHAR",
+            cx_Oracle_FIXED_CHAR,
+        ),
+        (
+            "CLOB",
+            cx_Oracle_CLOB,
+        ),
+        (
+            "NCLOB",
+            cx_Oracle_NCLOB,
+        ),
+        argnames="cx_oracle_type",
+        id_="ia",
     )
 
-    def _assert_errorhandler(self, outconverter, use_read, has_errorhandler):
+    def _assert_errorhandler(self, outconverter, has_errorhandler):
         data = ue("\uee2c\u9a66")  # this is u"\uee2c\u9a66"
 
         utf8_w_errors = data.encode("utf-16")
-
-        if use_read:
-            utf8_w_errors = mock.Mock(
-                read=mock.Mock(return_value=utf8_w_errors)
-            )
 
         if has_errorhandler:
 
@@ -132,9 +256,7 @@ class EncodingErrorsTest(fixtures.TestBase):
 
     @_oracle_char_combinations
     @testing.requires.python3
-    def test_older_cx_oracle_warning(
-        self, cx_Oracle, cx_oracle_type, use_read
-    ):
+    def test_older_cx_oracle_warning(self, cx_Oracle, cx_oracle_type):
         cx_Oracle.version = "6.3"
 
         ignore_dialect = cx_oracle.dialect(
@@ -156,7 +278,9 @@ class EncodingErrorsTest(fixtures.TestBase):
     @_oracle_char_combinations
     @testing.requires.python2
     def test_encoding_errors_sqla_py2k(
-        self, cx_Oracle, cx_oracle_type, use_read
+        self,
+        cx_Oracle,
+        cx_oracle_type,
     ):
         ignore_dialect = cx_oracle.dialect(
             dbapi=cx_Oracle, encoding_errors="ignore"
@@ -169,12 +293,14 @@ class EncodingErrorsTest(fixtures.TestBase):
         cursor = mock.Mock()
         ignore_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
         outconverter = cursor.mock_calls[0][2]["outconverter"]
-        self._assert_errorhandler(outconverter, use_read, True)
+        self._assert_errorhandler(outconverter, True)
 
     @_oracle_char_combinations
     @testing.requires.python2
     def test_no_encoding_errors_sqla_py2k(
-        self, cx_Oracle, cx_oracle_type, use_read
+        self,
+        cx_Oracle,
+        cx_oracle_type,
     ):
         plain_dialect = cx_oracle.dialect(dbapi=cx_Oracle)
 
@@ -185,12 +311,14 @@ class EncodingErrorsTest(fixtures.TestBase):
         cursor = mock.Mock()
         plain_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
         outconverter = cursor.mock_calls[0][2]["outconverter"]
-        self._assert_errorhandler(outconverter, use_read, False)
+        self._assert_errorhandler(outconverter, False)
 
     @_oracle_char_combinations
     @testing.requires.python3
     def test_encoding_errors_cx_oracle_py3k(
-        self, cx_Oracle, cx_oracle_type, use_read
+        self,
+        cx_Oracle,
+        cx_oracle_type,
     ):
         ignore_dialect = cx_oracle.dialect(
             dbapi=cx_Oracle, encoding_errors="ignore"
@@ -203,36 +331,24 @@ class EncodingErrorsTest(fixtures.TestBase):
         cursor = mock.Mock()
         ignore_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
 
-        if use_read:
-            eq_(
-                cursor.mock_calls,
-                [
-                    mock.call.var(
-                        mock.ANY,
-                        None,
-                        cursor.arraysize,
-                        encodingErrors="ignore",
-                        outconverter=mock.ANY,
-                    )
-                ],
-            )
-        else:
-            eq_(
-                cursor.mock_calls,
-                [
-                    mock.call.var(
-                        mock.ANY,
-                        None,
-                        cursor.arraysize,
-                        encodingErrors="ignore",
-                    )
-                ],
-            )
+        eq_(
+            cursor.mock_calls,
+            [
+                mock.call.var(
+                    mock.ANY,
+                    None,
+                    cursor.arraysize,
+                    encodingErrors="ignore",
+                )
+            ],
+        )
 
     @_oracle_char_combinations
     @testing.requires.python3
     def test_no_encoding_errors_cx_oracle_py3k(
-        self, cx_Oracle, cx_oracle_type, use_read
+        self,
+        cx_Oracle,
+        cx_oracle_type,
     ):
         plain_dialect = cx_oracle.dialect(dbapi=cx_Oracle)
 
@@ -243,20 +359,10 @@ class EncodingErrorsTest(fixtures.TestBase):
         cursor = mock.Mock()
         plain_outputhandler(cursor, "foo", cx_oracle_type, None, None, None)
 
-        if use_read:
-            eq_(
-                cursor.mock_calls,
-                [
-                    mock.call.var(
-                        mock.ANY, None, cursor.arraysize, outconverter=mock.ANY
-                    )
-                ],
-            )
-        else:
-            eq_(
-                cursor.mock_calls,
-                [mock.call.var(mock.ANY, None, cursor.arraysize)],
-            )
+        eq_(
+            cursor.mock_calls,
+            [mock.call.var(mock.ANY, None, cursor.arraysize)],
+        )
 
 
 class ComputedReturningTest(fixtures.TablesTest):
@@ -282,22 +388,28 @@ class ComputedReturningTest(fixtures.TablesTest):
             implicit_returning=False,
         )
 
-    def test_computed_insert(self):
+    def test_computed_insert(self, connection):
         test = self.tables.test
-        with testing.db.connect() as conn:
+        conn = connection
+        result = conn.execute(
+            test.insert().return_defaults(), {"id": 1, "foo": 5}
+        )
+
+        eq_(result.returned_defaults, (47,))
+
+        eq_(conn.scalar(select(test.c.bar)), 47)
+
+    def test_computed_update_warning(self, connection):
+        test = self.tables.test
+        conn = connection
+        conn.execute(test.insert(), {"id": 1, "foo": 5})
+
+        if testing.db.dialect._supports_update_returning_computed_cols:
             result = conn.execute(
-                test.insert().return_defaults(), {"id": 1, "foo": 5}
+                test.update().values(foo=10).return_defaults()
             )
-
-            eq_(result.returned_defaults, (47,))
-
-            eq_(conn.scalar(select([test.c.bar])), 47)
-
-    def test_computed_update_warning(self):
-        test = self.tables.test
-        with testing.db.connect() as conn:
-            conn.execute(test.insert(), {"id": 1, "foo": 5})
-
+            eq_(result.returned_defaults, (52,))
+        else:
             with testing.expect_warnings(
                 "Computed columns don't work with Oracle UPDATE"
             ):
@@ -308,21 +420,19 @@ class ComputedReturningTest(fixtures.TablesTest):
                 # returns the *old* value
                 eq_(result.returned_defaults, (47,))
 
-            eq_(conn.scalar(select([test.c.bar])), 52)
+        eq_(conn.scalar(select(test.c.bar)), 52)
 
-    def test_computed_update_no_warning(self):
+    def test_computed_update_no_warning(self, connection):
         test = self.tables.test_no_returning
-        with testing.db.connect() as conn:
-            conn.execute(test.insert(), {"id": 1, "foo": 5})
+        conn = connection
+        conn.execute(test.insert(), {"id": 1, "foo": 5})
 
-            result = conn.execute(
-                test.update().values(foo=10).return_defaults()
-            )
+        result = conn.execute(test.update().values(foo=10).return_defaults())
 
-            # no returning
-            eq_(result.returned_defaults, None)
+        # no returning
+        eq_(result.returned_defaults, None)
 
-            eq_(conn.scalar(select([test.c.bar])), 52)
+        eq_(conn.scalar(select(test.c.bar)), 52)
 
 
 class OutParamTest(fixtures.TestBase, AssertsExecutionResults):
@@ -330,23 +440,24 @@ class OutParamTest(fixtures.TestBase, AssertsExecutionResults):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
-        testing.db.execute(
-            """
-        create or replace procedure foo(x_in IN number, x_out OUT number,
-        y_out OUT number, z_out OUT varchar) IS
-        retval number;
-        begin
-            retval := 6;
-            x_out := 10;
-            y_out := x_in * 15;
-            z_out := NULL;
-        end;
-        """
-        )
+    def setup_test_class(cls):
+        with testing.db.begin() as c:
+            c.exec_driver_sql(
+                """
+create or replace procedure foo(x_in IN number, x_out OUT number,
+y_out OUT number, z_out OUT varchar) IS
+retval number;
+begin
+    retval := 6;
+    x_out := 10;
+    y_out := x_in * 15;
+    z_out := NULL;
+end;
+                """
+            )
 
-    def test_out_params(self):
-        result = testing.db.execute(
+    def test_out_params(self, connection):
+        result = connection.execute(
             text(
                 "begin foo(:x_in, :x_out, :y_out, " ":z_out); end;"
             ).bindparams(
@@ -355,14 +466,15 @@ class OutParamTest(fixtures.TestBase, AssertsExecutionResults):
                 outparam("y_out", Float),
                 outparam("z_out", String),
             ),
-            x_in=5,
+            dict(x_in=5),
         )
         eq_(result.out_parameters, {"x_out": 10, "y_out": 75, "z_out": None})
         assert isinstance(result.out_parameters["x_out"], int)
 
     @classmethod
-    def teardown_class(cls):
-        testing.db.execute("DROP PROCEDURE foo")
+    def teardown_test_class(cls):
+        with testing.db.begin() as conn:
+            conn.execute(text("DROP PROCEDURE foo"))
 
 
 class QuotedBindRoundTripTest(fixtures.TestBase):
@@ -370,11 +482,9 @@ class QuotedBindRoundTripTest(fixtures.TestBase):
     __only_on__ = "oracle"
     __backend__ = True
 
-    @testing.provide_metadata
-    def test_table_round_trip(self):
-        oracle.RESERVED_WORDS.remove("UNION")
+    def test_table_round_trip(self, metadata, connection):
+        oracle.RESERVED_WORDS.discard("UNION")
 
-        metadata = self.metadata
         table = Table(
             "t1",
             metadata,
@@ -385,46 +495,41 @@ class QuotedBindRoundTripTest(fixtures.TestBase):
             # is set
             Column("union", Integer, quote=True),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        table.insert().execute({"option": 1, "plain": 1, "union": 1})
-        eq_(testing.db.execute(table.select()).first(), (1, 1, 1))
-        table.update().values(option=2, plain=2, union=2).execute()
-        eq_(testing.db.execute(table.select()).first(), (2, 2, 2))
+        connection.execute(
+            table.insert(), {"option": 1, "plain": 1, "union": 1}
+        )
+        eq_(connection.execute(table.select()).first(), (1, 1, 1))
+        connection.execute(table.update().values(option=2, plain=2, union=2))
+        eq_(connection.execute(table.select()).first(), (2, 2, 2))
 
-    def test_numeric_bind_round_trip(self):
+    def test_numeric_bind_round_trip(self, connection):
         eq_(
-            testing.db.scalar(
+            connection.scalar(
                 select(
-                    [
-                        literal_column("2", type_=Integer())
-                        + bindparam("2_1", value=2)
-                    ]
+                    literal_column("2", type_=Integer())
+                    + bindparam("2_1", value=2)
                 )
             ),
             4,
         )
 
-    @testing.provide_metadata
-    def test_numeric_bind_in_crud(self):
-        t = Table("asfd", self.metadata, Column("100K", Integer))
-        t.create()
+    def test_numeric_bind_in_crud(self, metadata, connection):
+        t = Table("asfd", metadata, Column("100K", Integer))
+        t.create(connection)
 
-        testing.db.execute(t.insert(), {"100K": 10})
-        eq_(testing.db.scalar(t.select()), 10)
+        connection.execute(t.insert(), {"100K": 10})
+        eq_(connection.scalar(t.select()), 10)
 
-    @testing.provide_metadata
-    def test_expanding_quote_roundtrip(self):
-        t = Table("asfd", self.metadata, Column("foo", Integer))
-        t.create()
+    def test_expanding_quote_roundtrip(self, metadata, connection):
+        t = Table("asfd", metadata, Column("foo", Integer))
+        t.create(connection)
 
-        with testing.db.connect() as conn:
-            conn.execute(
-                select([t]).where(
-                    t.c.foo.in_(bindparam("uid", expanding=True))
-                ),
-                uid=[1, 2, 3],
-            )
+        connection.execute(
+            select(t).where(t.c.foo.in_(bindparam("uid", expanding=True))),
+            dict(uid=[1, 2, 3]),
+        )
 
 
 class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -433,9 +538,15 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
             return server_version
 
         dialect = oracle.dialect(
-            dbapi=Mock(version="0.0.0", paramstyle="named"), **kw
+            dbapi=Mock(
+                version="0.0.0",
+                paramstyle="named",
+            ),
+            **kw
         )
+
         dialect._get_server_version_info = server_version_info
+        dialect.get_isolation_level = Mock()
         dialect._check_unicode_returns = Mock()
         dialect._check_unicode_description = Mock()
         dialect._get_default_schema_name = Mock()
@@ -511,7 +622,9 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
 
         dialect = self._dialect((12, 2, 0))
         conn = mock.Mock(
-            execute=mock.Mock(return_value=mock.Mock(scalar=lambda: "12.2.0"))
+            exec_driver_sql=mock.Mock(
+                return_value=mock.Mock(scalar=lambda: "12.2.0")
+            )
         )
         dialect.initialize(conn)
         eq_(dialect.server_version_info, (12, 2, 0))
@@ -524,7 +637,9 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
         dialect = self._dialect((12, 2, 0))
 
         conn = mock.Mock(
-            execute=mock.Mock(return_value=mock.Mock(scalar=lambda: "12.2.0"))
+            exec_driver_sql=mock.Mock(
+                return_value=mock.Mock(scalar=lambda: "12.2.0")
+            )
         )
         dialect.initialize(conn)
         eq_(dialect.server_version_info, (12, 2, 0))
@@ -540,7 +655,7 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
         dialect = self._dialect((11, 2, 0))
 
         conn = mock.Mock(
-            execute=mock.Mock(return_value=mock.Mock(scalar="11.0.0"))
+            exec_driver_sql=mock.Mock(return_value=mock.Mock(scalar="11.0.0"))
         )
         dialect.initialize(conn)
         eq_(dialect.server_version_info, (11, 2, 0))
@@ -553,7 +668,9 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
         dialect = self._dialect((12, 2, 0))
 
         conn = mock.Mock(
-            execute=mock.Mock(return_value=mock.Mock(scalar=lambda: "11.0.0"))
+            exec_driver_sql=mock.Mock(
+                return_value=mock.Mock(scalar=lambda: "11.0.0")
+            )
         )
         dialect.initialize(conn)
         eq_(dialect.server_version_info, (12, 2, 0))
@@ -571,7 +688,7 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
             )
 
         conn = mock.Mock(
-            execute=mock.Mock(return_value=mock.Mock(scalar=c122))
+            exec_driver_sql=mock.Mock(return_value=mock.Mock(scalar=c122))
         )
         dialect.initialize(conn)
         eq_(dialect.server_version_info, (12, 2, 0))
@@ -590,7 +707,7 @@ class CompatFlagsTest(fixtures.TestBase, AssertsCompiledSQL):
             return "12.thisiscrap.0"
 
         conn = mock.Mock(
-            execute=mock.Mock(return_value=mock.Mock(scalar=c122))
+            exec_driver_sql=mock.Mock(return_value=mock.Mock(scalar=c122))
         )
         dialect.initialize(conn)
         eq_(dialect.server_version_info, (12, 2, 0))
@@ -609,26 +726,25 @@ class ExecuteTest(fixtures.TestBase):
     __backend__ = True
 
     def test_basic(self):
-        eq_(
-            testing.db.execute(
-                "/*+ this is a comment */ SELECT 1 FROM " "DUAL"
-            ).fetchall(),
-            [(1,)],
-        )
+        with testing.db.connect() as conn:
+            eq_(
+                conn.exec_driver_sql(
+                    "/*+ this is a comment */ SELECT 1 FROM " "DUAL"
+                ).fetchall(),
+                [(1,)],
+            )
 
-    def test_sequences_are_integers(self):
+    def test_sequences_are_integers(self, connection):
         seq = Sequence("foo_seq")
-        seq.create(testing.db)
+        seq.create(connection)
         try:
-            val = testing.db.execute(seq)
+            val = connection.execute(seq)
             eq_(val, 1)
             assert type(val) is int
         finally:
-            seq.drop(testing.db)
+            seq.drop(connection)
 
-    @testing.provide_metadata
-    def test_limit_offset_for_update(self):
-        metadata = self.metadata
+    def test_limit_offset_for_update(self, metadata, connection):
         # oracle can't actually do the ROWNUM thing with FOR UPDATE
         # very well.
 
@@ -638,19 +754,24 @@ class ExecuteTest(fixtures.TestBase):
             Column("id", Integer, primary_key=True),
             Column("data", Integer),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        t.insert().execute(
-            {"id": 1, "data": 1},
-            {"id": 2, "data": 7},
-            {"id": 3, "data": 12},
-            {"id": 4, "data": 15},
-            {"id": 5, "data": 32},
+        connection.execute(
+            t.insert(),
+            [
+                {"id": 1, "data": 1},
+                {"id": 2, "data": 7},
+                {"id": 3, "data": 12},
+                {"id": 4, "data": 15},
+                {"id": 5, "data": 32},
+            ],
         )
 
         # here, we can't use ORDER BY.
         eq_(
-            t.select().with_for_update().limit(2).execute().fetchall(),
+            connection.execute(
+                t.select().with_for_update().limit(2)
+            ).fetchall(),
             [(1, 1), (2, 7)],
         )
 
@@ -659,7 +780,8 @@ class ExecuteTest(fixtures.TestBase):
         assert_raises_message(
             exc.DatabaseError,
             "ORA-02014",
-            t.select().with_for_update().limit(2).offset(3).execute,
+            connection.execute,
+            t.select().with_for_update().limit(2).offset(3),
         )
 
 
@@ -667,34 +789,30 @@ class UnicodeSchemaTest(fixtures.TestBase):
     __only_on__ = "oracle"
     __backend__ = True
 
-    @testing.provide_metadata
-    def test_quoted_column_non_unicode(self):
-        metadata = self.metadata
+    def test_quoted_column_non_unicode(self, metadata, connection):
         table = Table(
             "atable",
             metadata,
             Column("_underscorecolumn", Unicode(255), primary_key=True),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        table.insert().execute({"_underscorecolumn": u("’é")})
-        result = testing.db.execute(
+        connection.execute(table.insert(), {"_underscorecolumn": u("’é")})
+        result = connection.execute(
             table.select().where(table.c._underscorecolumn == u("’é"))
         ).scalar()
         eq_(result, u("’é"))
 
-    @testing.provide_metadata
-    def test_quoted_column_unicode(self):
-        metadata = self.metadata
+    def test_quoted_column_unicode(self, metadata, connection):
         table = Table(
             "atable",
             metadata,
             Column(u("méil"), Unicode(255), primary_key=True),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        table.insert().execute({u("méil"): u("’é")})
-        result = testing.db.execute(
+        connection.execute(table.insert(), {u("méil"): u("’é")})
+        result = connection.execute(
             table.select().where(table.c[u("méil")] == u("’é"))
         ).scalar()
         eq_(result, u("’é"))
@@ -829,3 +947,110 @@ class CXOracleConnectArgsTest(fixtures.TestBase):
             "auto_convert_lobs",
             False,
         )
+
+
+class TableValuedTest(fixtures.TestBase):
+    __backend__ = True
+    __only_on__ = "oracle"
+
+    @testing.fixture
+    def scalar_strings(self, connection):
+        connection.exec_driver_sql(
+            "CREATE OR REPLACE TYPE strings_t IS TABLE OF VARCHAR2 (100)"
+        )
+        connection.exec_driver_sql(
+            r"""
+CREATE OR REPLACE FUNCTION scalar_strings (
+   count_in IN INTEGER)
+   RETURN strings_t
+   AUTHID DEFINER
+IS
+   l_strings   strings_t := strings_t ();
+BEGIN
+   l_strings.EXTEND (count_in);
+
+   FOR indx IN 1 .. count_in
+   LOOP
+      l_strings (indx) := 'some string';
+   END LOOP;
+
+   RETURN l_strings;
+END;
+        """
+        )
+        yield
+        connection.exec_driver_sql("DROP FUNCTION scalar_strings")
+        connection.exec_driver_sql("DROP TYPE strings_t")
+
+    @testing.fixture
+    def two_strings(self, connection):
+        connection.exec_driver_sql(
+            """
+CREATE OR REPLACE TYPE two_strings_ot
+   AUTHID DEFINER IS OBJECT
+(
+   string1 VARCHAR2 (10),
+   string2 VARCHAR2 (10)
+)"""
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE OR REPLACE TYPE two_strings_nt IS TABLE OF two_strings_ot
+"""
+        )
+
+        connection.exec_driver_sql(
+            """
+        CREATE OR REPLACE FUNCTION three_pairs
+   RETURN two_strings_nt
+   AUTHID DEFINER
+IS
+   l_strings   two_strings_nt;
+BEGIN
+   RETURN two_strings_nt (two_strings_ot ('a', 'b'),
+                          two_strings_ot ('c', 'd'),
+                          two_strings_ot ('e', 'f'));
+END;
+"""
+        )
+        yield
+        connection.exec_driver_sql("DROP FUNCTION three_pairs")
+        connection.exec_driver_sql("DROP TYPE two_strings_nt")
+        connection.exec_driver_sql("DROP TYPE two_strings_ot")
+
+    def test_scalar_strings_control(self, scalar_strings, connection):
+        result = (
+            connection.exec_driver_sql(
+                "SELECT COLUMN_VALUE my_string FROM TABLE (scalar_strings (5))"
+            )
+            .scalars()
+            .all()
+        )
+        eq_(result, ["some string"] * 5)
+
+    def test_scalar_strings_named_control(self, scalar_strings, connection):
+        result = (
+            connection.exec_driver_sql(
+                "SELECT COLUMN_VALUE anon_1 "
+                "FROM TABLE (scalar_strings (5)) anon_1"
+            )
+            .scalars()
+            .all()
+        )
+        eq_(result, ["some string"] * 5)
+
+    def test_scalar_strings(self, scalar_strings, connection):
+        fn = func.scalar_strings(5)
+        result = connection.execute(select(fn.column_valued())).scalars().all()
+        eq_(result, ["some string"] * 5)
+
+    def test_two_strings_control(self, two_strings, connection):
+        result = connection.exec_driver_sql(
+            "SELECT string1, string2 FROM TABLE (three_pairs ())"
+        ).all()
+        eq_(result, [("a", "b"), ("c", "d"), ("e", "f")])
+
+    def test_two_strings(self, two_strings, connection):
+        fn = func.three_pairs().table_valued("string1", "string2")
+        result = connection.execute(select(fn.c.string1, fn.c.string2)).all()
+        eq_(result, [("a", "b"), ("c", "d"), ("e", "f")])

@@ -16,6 +16,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.fixtures import ComparableEntity
+from sqlalchemy.testing.fixtures import fixture_session
 
 
 class PartitionByFixture(fixtures.DeclarativeMappedTest):
@@ -40,12 +41,10 @@ class PartitionByFixture(fixtures.DeclarativeMappedTest):
             b_id = Column(ForeignKey("b.id"))
 
         partition = select(
-            [
-                B,
-                func.row_number()
-                .over(order_by=B.id, partition_by=B.a_id)
-                .label("index"),
-            ]
+            B,
+            func.row_number()
+            .over(order_by=B.id, partition_by=B.a_id)
+            .label("index"),
         ).alias()
 
         partitioned_b = aliased(B, alias=partition)
@@ -58,10 +57,10 @@ class PartitionByFixture(fixtures.DeclarativeMappedTest):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, C = cls.classes("A", "B", "C")
 
-        s = Session(testing.db)
+        s = Session(connection)
         s.add_all([A(id=i) for i in range(1, 4)])
         s.flush()
         s.add_all(
@@ -198,9 +197,9 @@ class AltSelectableTest(
         A.b = relationship(B_viacd, primaryjoin=A.b_id == j.c.b_id)
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B, C, D = cls.classes("A", "B", "C", "D")
-        sess = Session()
+        sess = Session(connection)
 
         for obj in [
             B(id=1),
@@ -215,7 +214,7 @@ class AltSelectableTest(
     def test_lazyload(self):
         A, B = self.classes("A", "B")
 
-        sess = Session()
+        sess = fixture_session()
         a1 = sess.query(A).first()
 
         with self.sql_execution_asserter() as asserter:
@@ -234,7 +233,7 @@ class AltSelectableTest(
     def test_joinedload(self):
         A, B = self.classes("A", "B")
 
-        sess = Session()
+        sess = fixture_session()
 
         with self.sql_execution_asserter() as asserter:
             # note this is many-to-one.  use_get is unconditionally turned
@@ -256,7 +255,7 @@ class AltSelectableTest(
     def test_selectinload(self):
         A, B = self.classes("A", "B")
 
-        sess = Session()
+        sess = fixture_session()
 
         with self.sql_execution_asserter() as asserter:
             # note this is many-to-one.  use_get is unconditionally turned
@@ -274,7 +273,7 @@ class AltSelectableTest(
                 "SELECT a_1.id AS a_1_id, b.id AS b_id FROM a AS a_1 "
                 "JOIN (b JOIN d ON d.b_id = b.id JOIN c ON c.id = d.c_id) "
                 "ON a_1.b_id = b.id WHERE a_1.id "
-                "IN ([POSTCOMPILE_primary_keys]) ORDER BY a_1.id",
+                "IN ([POSTCOMPILE_primary_keys])",
                 [{"primary_keys": [1]}],
             ),
         )
@@ -282,7 +281,7 @@ class AltSelectableTest(
     def test_join(self):
         A, B = self.classes("A", "B")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(A).join(A.b),

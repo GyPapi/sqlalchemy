@@ -15,39 +15,67 @@ with component dependencies organized into layers:
 .. image:: sqla_arch_small.png
 
 Above, the two most significant front-facing portions of
-SQLAlchemy are the **Object Relational Mapper** and the
-**SQL Expression Language**. SQL Expressions can be used
-independently of the ORM. When using the ORM, the SQL
-Expression language remains part of the public facing API
-as it is used within object-relational configurations and
-queries.
+SQLAlchemy are the **Object Relational Mapper (ORM)** and the
+**Core**.
+
+Core contains the breadth of SQLAlchemy's SQL and database
+integration and description services, the most prominent part of this
+being the **SQL Expression Language**.
+
+The SQL Expression Language is a toolkit all its own, independent of the ORM
+package, which provides a system of constructing SQL expressions represented by
+composable objects, which can then be "executed" against a target database
+within the scope of a specific transaction, returning a result set.
+Inserts, updates and deletes (i.e. :term:`DML`) are achieved by passing
+SQL expression objects representing these statements along with dictionaries
+that represent parameters to be used with each statement.
+
+The ORM builds upon Core to provide a means of working with a domain object
+model mapped to a database schema. When using the ORM, SQL statements are
+constructed in mostly the same way as when using Core, however the task of DML,
+which here refers to the persistence of business objects in a database, is
+automated using a pattern called :term:`unit of work`, which translates changes
+in state against mutable objects into INSERT, UPDATE and DELETE constructs
+which are then invoked in terms of those objects. SELECT statements are also
+augmented by ORM-specific automations and object-centric querying capabilities.
+
+Whereas working with Core and the SQL Expression language presents a
+schema-centric view of the database, along with a programming paradigm that is
+oriented around immutability, the ORM builds on top of this a domain-centric
+view of the database with a programming paradigm that is more explcitly
+object-oriented and reliant upon mutability.  Since a relational database is
+itself a mutable service, the difference is that Core/SQL Expression language
+is command oriented whereas the ORM is state oriented.
+
 
 .. _doc_overview:
 
 Documentation Overview
 ======================
 
-The documentation is separated into three sections: :ref:`orm_toplevel`,
-:ref:`core_toplevel`, and :ref:`dialect_toplevel`.
+The documentation is separated into four sections:
 
-In :ref:`orm_toplevel`, the Object Relational Mapper is introduced and fully
-described. New users should begin with the :ref:`ormtutorial_toplevel`. If you
-want to work with higher-level SQL which is constructed automatically for you,
-as well as management of Python objects, proceed to this tutorial.
+* :ref:`unified_tutorial` - this all-new tutorial for the 1.4/2.0 series of
+  SQLAlchemy introduces the entire library holistically, starting from a
+  description of Core and working more and more towards ORM-specific concepts.
+  New users, as well as users coming from :term:`1.x style`, who wish to work
+  in :term:`2.0 style` should start here.
 
-In :ref:`core_toplevel`, the breadth of SQLAlchemy's SQL and database
-integration and description services are documented, the core of which is the
-SQL Expression language. The SQL Expression Language is a toolkit all its own,
-independent of the ORM package, which can be used to construct manipulable SQL
-expressions which can be programmatically constructed, modified, and executed,
-returning cursor-like result sets. In contrast to the ORM's domain-centric
-mode of usage, the expression language provides a schema-centric usage
-paradigm. New users should begin here with :ref:`sqlexpression_toplevel`.
-SQLAlchemy engine, connection, and pooling services are also described in
-:ref:`core_toplevel`.
+* :ref:`orm_toplevel` - In this section, reference documentation for the ORM is
+  presented; this section also includes the now-legacy
+  :ref:`ormtutorial_toplevel`.
 
-In :ref:`dialect_toplevel`, reference documentation for all provided
-database and DBAPI backends is provided.
+* :ref:`core_toplevel` - Here, reference documentation for
+  everything else within Core is presented; section also includes the legacy
+  :ref:`sqlexpression_toplevel`. SQLAlchemy engine, connection, and pooling
+  services are also described here.
+
+* :ref:`dialect_toplevel` - Provides reference documentation
+  for all :term:`dialect` implementations, including :term:`DBAPI` specifics.
+
+
+
+
 
 Code Examples
 =============
@@ -71,14 +99,15 @@ Supported Platforms
 SQLAlchemy has been tested against the following platforms:
 
 * cPython 2.7
-* cPython 3.4 and higher
+* cPython 3.6 and higher
 * `PyPy <http://pypy.org/>`_ 2.1 or greater
 
-.. versionchanged:: 1.2
-   Python 2.7 is now the minimum Python version supported.
+.. versionchanged:: 1.4
+   Within the Python 3 series, 3.6 is now the minimum Python 3 version supported.
 
-.. versionchanged:: 1.3
-   Within the Python 3 series, 3.4 is now the minimum Python 3 version supported.
+   .. seealso::
+
+      :ref:`change_5634`
 
 Supported Installation Methods
 -------------------------------
@@ -144,7 +173,6 @@ mechanism::
 .. versionchanged:: 1.1 The legacy ``--without-cextensions`` flag has been
    removed from the installer as it relies on deprecated features of
    setuptools.
-
 
 
 Installing a Database API

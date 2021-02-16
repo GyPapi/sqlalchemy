@@ -1,5 +1,5 @@
 # orm/__init__.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -16,14 +16,33 @@ documentation for an overview of how this module is used.
 from . import exc  # noqa
 from . import mapper as mapperlib  # noqa
 from . import strategy_options
-from .descriptor_props import ComparableProperty  # noqa
+from .attributes import AttributeEvent  # noqa
+from .attributes import InstrumentedAttribute  # noqa
+from .attributes import QueryableAttribute  # noqa
+from .context import QueryContext  # noqa
+from .decl_api import as_declarative  # noqa
+from .decl_api import declarative_base  # noqa
+from .decl_api import declared_attr  # noqa
+from .decl_api import has_inherited_table  # noqa
+from .decl_api import registry  # noqa
+from .decl_api import synonym_for  # noqa
 from .descriptor_props import CompositeProperty  # noqa
 from .descriptor_props import SynonymProperty  # noqa
+from .identity import IdentityMap  # noqa
+from .instrumentation import ClassManager  # noqa
 from .interfaces import EXT_CONTINUE  # noqa
 from .interfaces import EXT_SKIP  # noqa
 from .interfaces import EXT_STOP  # noqa
+from .interfaces import InspectionAttr  # noqa
+from .interfaces import InspectionAttrInfo  # noqa
+from .interfaces import MANYTOMANY  # noqa
+from .interfaces import MANYTOONE  # noqa
+from .interfaces import MapperProperty  # noqa
+from .interfaces import NOT_EXTENSION  # noqa
+from .interfaces import ONETOMANY  # noqa
 from .interfaces import PropComparator  # noqa
-from .mapper import _mapper_registry
+from .loading import merge_frozen_result  # noqa
+from .loading import merge_result  # noqa
 from .mapper import class_mapper  # noqa
 from .mapper import configure_mappers  # noqa
 from .mapper import Mapper  # noqa
@@ -31,7 +50,7 @@ from .mapper import reconstructor  # noqa
 from .mapper import validates  # noqa
 from .properties import ColumnProperty  # noqa
 from .query import AliasOption  # noqa
-from .query import Bundle  # noqa
+from .query import FromStatement  # noqa
 from .query import Query  # noqa
 from .relationships import foreign  # noqa
 from .relationships import RelationshipProperty  # noqa
@@ -41,11 +60,19 @@ from .session import close_all_sessions  # noqa
 from .session import make_transient  # noqa
 from .session import make_transient_to_detached  # noqa
 from .session import object_session  # noqa
+from .session import ORMExecuteState  # noqa
 from .session import Session  # noqa
 from .session import sessionmaker  # noqa
+from .session import SessionTransaction  # noqa
+from .state import AttributeState  # noqa
+from .state import InstanceState  # noqa
 from .strategy_options import Load  # noqa
+from .unitofwork import UOWTransaction  # noqa
 from .util import aliased  # noqa
+from .util import Bundle  # noqa
+from .util import CascadeOptions  # noqa
 from .util import join  # noqa
+from .util import LoaderCriteriaOption  # noqa
 from .util import object_mapper  # noqa
 from .util import outerjoin  # noqa
 from .util import polymorphic_union  # noqa
@@ -88,15 +115,23 @@ def create_session(bind=None, **kwargs):
     create_session().
 
     """
+
+    if kwargs.get("future", False):
+        kwargs.setdefault("autocommit", False)
+    else:
+        kwargs.setdefault("autocommit", True)
+
     kwargs.setdefault("autoflush", False)
-    kwargs.setdefault("autocommit", True)
     kwargs.setdefault("expire_on_commit", False)
     return Session(bind=bind, **kwargs)
 
 
+with_loader_criteria = public_factory(LoaderCriteriaOption, ".orm")
+
 relationship = public_factory(RelationshipProperty, ".orm.relationship")
 
 
+@_sa_util.deprecated_20("relation", "Please use :func:`.relationship`.")
 def relation(*arg, **kw):
     """A synonym for :func:`relationship`."""
 
@@ -151,7 +186,8 @@ def deferred(*columns, **kw):
     not load unless accessed.
 
     :param \*columns: columns to be mapped.  This is typically a single
-     :class:`.Column` object, however a collection is supported in order
+     :class:`_schema.Column` object,
+     however a collection is supported in order
      to support multiple columns mapped under the same attribute.
 
     :param raiseload: boolean, if True, indicates an exception should be raised
@@ -174,17 +210,30 @@ def deferred(*columns, **kw):
     return ColumnProperty(deferred=True, *columns, **kw)
 
 
-def query_expression():
+def query_expression(default_expr=_sql.null()):
     """Indicate an attribute that populates from a query-time SQL expression.
+
+    :param default_expr: Optional SQL expression object that will be used in
+        all cases if not assigned later with :func:`_orm.with_expression`.
+        E.g.::
+
+            from sqlalchemy.sql import literal
+
+            class C(Base):
+                #...
+                my_expr = query_expression(literal(1))
+
+        .. versionadded:: 1.3.18
+
 
     .. versionadded:: 1.2
 
     .. seealso::
 
-        :ref:`mapper_query_expression`
+        :ref:`mapper_querytime_expression`
 
     """
-    prop = ColumnProperty(_sql.null())
+    prop = ColumnProperty(default_expr)
     prop.strategy_key = (("query_expression", True),)
     return prop
 
@@ -193,26 +242,13 @@ mapper = public_factory(Mapper, ".orm.mapper")
 
 synonym = public_factory(SynonymProperty, ".orm.synonym")
 
-comparable_property = public_factory(
-    ComparableProperty, ".orm.comparable_property"
-)
-
-
-@_sa_util.deprecated(
-    "0.7",
-    message=":func:`.compile_mappers` is deprecated and will be removed "
-    "in a future release.  Please use :func:`.configure_mappers`",
-)
-def compile_mappers():
-    """Initialize the inter-mapper relationships of all mappers that have
-    been defined.
-
-    """
-    configure_mappers()
-
 
 def clear_mappers():
     """Remove all mappers from all classes.
+
+    .. versionchanged:: 1.4  This function now locates all
+       :class:`_orm.registry` objects and calls upon the
+       :meth:`_orm.registry.dispose` method of each.
 
     This function removes all instrumentation from classes and disposes
     of their associated mappers.  Once called, the classes are unmapped
@@ -231,14 +267,11 @@ def clear_mappers():
     upon a fixed set of classes.
 
     """
-    with mapperlib._CONFIGURE_MUTEX:
-        while _mapper_registry:
-            mapper, b = _mapper_registry.popitem()
-            mapper.dispose()
+
+    mapperlib._dispose_registries(mapperlib._all_registries(), False)
 
 
 joinedload = strategy_options.joinedload._unbound_fn
-joinedload_all = strategy_options.joinedload._unbound_all_fn
 contains_eager = strategy_options.contains_eager._unbound_fn
 defer = strategy_options.defer._unbound_fn
 undefer = strategy_options.undefer._unbound_fn
@@ -246,11 +279,8 @@ undefer_group = strategy_options.undefer_group._unbound_fn
 with_expression = strategy_options.with_expression._unbound_fn
 load_only = strategy_options.load_only._unbound_fn
 lazyload = strategy_options.lazyload._unbound_fn
-lazyload_all = strategy_options.lazyload_all._unbound_all_fn
 subqueryload = strategy_options.subqueryload._unbound_fn
-subqueryload_all = strategy_options.subqueryload_all._unbound_all_fn
 selectinload = strategy_options.selectinload._unbound_fn
-selectinload_all = strategy_options.selectinload_all._unbound_all_fn
 immediateload = strategy_options.immediateload._unbound_fn
 noload = strategy_options.noload._unbound_fn
 raiseload = strategy_options.raiseload._unbound_fn
@@ -258,26 +288,33 @@ defaultload = strategy_options.defaultload._unbound_fn
 selectin_polymorphic = strategy_options.selectin_polymorphic._unbound_fn
 
 
+@_sa_util.deprecated_20("eagerload", "Please use :func:`_orm.joinedload`.")
 def eagerload(*args, **kwargs):
     """A synonym for :func:`joinedload()`."""
     return joinedload(*args, **kwargs)
 
 
-def eagerload_all(*args, **kwargs):
-    """A synonym for :func:`joinedload_all()`"""
-    return joinedload_all(*args, **kwargs)
-
-
 contains_alias = public_factory(AliasOption, ".orm.contains_alias")
+
+if True:
+    from .events import AttributeEvents  # noqa
+    from .events import MapperEvents  # noqa
+    from .events import InstanceEvents  # noqa
+    from .events import InstrumentationEvents  # noqa
+    from .events import QueryEvents  # noqa
+    from .events import SessionEvents  # noqa
 
 
 def __go(lcls):
     global __all__
+    global AppenderQuery
     from .. import util as sa_util  # noqa
     from . import dynamic  # noqa
     from . import events  # noqa
     from . import loading  # noqa
     import inspect as _inspect
+
+    from .dynamic import AppenderQuery
 
     __all__ = sorted(
         name
@@ -285,8 +322,8 @@ def __go(lcls):
         if not (name.startswith("_") or _inspect.ismodule(obj))
     )
 
-    _sa_util.dependencies.resolve_all("sqlalchemy.orm")
-    _sa_util.dependencies.resolve_all("sqlalchemy.ext")
+    _sa_util.preloaded.import_prefix("sqlalchemy.orm")
+    _sa_util.preloaded.import_prefix("sqlalchemy.ext")
 
 
 __go(locals())

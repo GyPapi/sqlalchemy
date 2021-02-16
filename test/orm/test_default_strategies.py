@@ -1,11 +1,11 @@
 import sqlalchemy as sa
 from sqlalchemy import testing
 from sqlalchemy import util
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing.fixtures import fixture_session
 from test.orm import _fixtures
 
 
@@ -110,7 +110,7 @@ class DefaultStrategyOptionsTest(_fixtures.FixtureTest):
             ),
         )
 
-        return create_session()
+        return fixture_session()
 
     def _upgrade_fixture(self):
         (
@@ -182,7 +182,7 @@ class DefaultStrategyOptionsTest(_fixtures.FixtureTest):
             ),
         )
 
-        return create_session()
+        return fixture_session()
 
     def test_downgrade_baseline(self):
         """Mapper strategy defaults load as expected
@@ -259,8 +259,7 @@ class DefaultStrategyOptionsTest(_fixtures.FixtureTest):
         assert_raises_message(
             sa.exc.ArgumentError,
             "Wildcard token cannot be followed by another entity",
-            sess.query(User).options,
-            opt,
+            sess.query(User).options(opt)._compile_context,
         )
 
     def test_global_star_ignored_no_entities_unbound(self):
@@ -606,3 +605,93 @@ class DefaultStrategyOptionsTest(_fixtures.FixtureTest):
 
         # verify everything loaded, with no additional sql needed
         self._assert_fully_loaded(users)
+
+
+class NoLoadTest(_fixtures.FixtureTest):
+    run_inserts = "once"
+    run_deletes = None
+
+    def test_o2m_noload(self):
+
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+
+        m = mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses), lazy="noload"
+                )
+            ),
+        )
+        q = fixture_session().query(m)
+        result = [None]
+
+        def go():
+            x = q.filter(User.id == 7).all()
+            x[0].addresses
+            result[0] = x
+
+        self.assert_sql_count(testing.db, go, 1)
+
+        self.assert_result(
+            result[0], User, {"id": 7, "addresses": (Address, [])}
+        )
+
+    def test_upgrade_o2m_noload_lazyload_option(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+
+        m = mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses), lazy="noload"
+                )
+            ),
+        )
+        q = fixture_session().query(m).options(sa.orm.lazyload("addresses"))
+        result = [None]
+
+        def go():
+            x = q.filter(User.id == 7).all()
+            x[0].addresses
+            result[0] = x
+
+        self.sql_count_(2, go)
+
+        self.assert_result(
+            result[0], User, {"id": 7, "addresses": (Address, [{"id": 1}])}
+        )
+
+    def test_m2o_noload_option(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+        mapper(Address, addresses, properties={"user": relationship(User)})
+        mapper(User, users)
+        s = fixture_session()
+        a1 = (
+            s.query(Address)
+            .filter_by(id=1)
+            .options(sa.orm.noload("user"))
+            .first()
+        )
+
+        def go():
+            eq_(a1.user, None)
+
+        self.sql_count_(0, go)

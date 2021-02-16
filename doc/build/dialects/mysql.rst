@@ -1,7 +1,7 @@
 .. _mysql_toplevel:
 
-MySQL
-=====
+MySQL and MariaDB
+=================
 
 .. automodule:: sqlalchemy.dialects.mysql.base
 
@@ -159,9 +159,9 @@ construction arguments, are as follows:
 MySQL DML Constructs
 -------------------------
 
-.. autofunction:: sqlalchemy.dialects.mysql.dml.insert
+.. autofunction:: sqlalchemy.dialects.mysql.insert
 
-.. autoclass:: sqlalchemy.dialects.mysql.dml.Insert
+.. autoclass:: sqlalchemy.dialects.mysql.Insert
   :members:
 
 
@@ -181,6 +181,13 @@ MySQL-Connector
 
 .. automodule:: sqlalchemy.dialects.mysql.mysqlconnector
 
+.. _aiomysql:
+
+aiomysql
+--------
+
+.. automodule:: sqlalchemy.dialects.mysql.aiomysql
+
 cymysql
 -------
 
@@ -190,11 +197,6 @@ OurSQL
 ------
 
 .. automodule:: sqlalchemy.dialects.mysql.oursql
-
-Google App Engine
------------------
-
-.. automodule:: sqlalchemy.dialects.mysql.gaerdbms
 
 pyodbc
 ------

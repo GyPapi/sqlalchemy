@@ -10,9 +10,9 @@ from sqlalchemy.orm import backref
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import polymorphic_union
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -247,9 +247,9 @@ class MagazineTest(fixtures.MappedTest):
                     "c": self.tables.page.join(self.tables.magazine_page).join(
                         self.tables.classified_page
                     ),
-                    "p": self.tables.page.select(
-                        self.tables.page.c.type == "p"
-                    ).subquery(),
+                    "p": self.tables.page.select()
+                    .where(self.tables.page.c.type == "p")
+                    .subquery(),
                 },
                 None,
                 "page_join",
@@ -360,7 +360,7 @@ class MagazineTest(fixtures.MappedTest):
 
         Publication = self.classes.Publication
 
-        session = Session()
+        session = fixture_session()
 
         pub = self._generate_data()
         session.add(pub)

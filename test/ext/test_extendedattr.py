@@ -32,7 +32,7 @@ def modifies_instrumentation_finders(fn, *args, **kw):
 
 class _ExtBase(object):
     @classmethod
-    def teardown_class(cls):
+    def teardown_test_class(cls):
         instrumentation._reinstall_default_lookups()
 
 
@@ -89,7 +89,7 @@ MyBaseClass, MyClass = None, None
 
 class UserDefinedExtensionTest(_ExtBase, fixtures.ORMTest):
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         global MyBaseClass, MyClass
 
         class MyBaseClass(object):
@@ -143,7 +143,7 @@ class UserDefinedExtensionTest(_ExtBase, fixtures.ORMTest):
                 else:
                     del self._goofy_dict[key]
 
-    def teardown(self):
+    def teardown_test(self):
         clear_mappers()
 
     def test_instance_dict(self):
@@ -223,7 +223,7 @@ class UserDefinedExtensionTest(_ExtBase, fixtures.ORMTest):
 
             data = {"a": "this is a", "b": 12}
 
-            def loader(state, keys):
+            def loader(state, keys, passive):
                 for k in keys:
                     state.dict[k] = data[k]
                 return attributes.ATTR_WAS_SET

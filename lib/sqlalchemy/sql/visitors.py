@@ -1,5 +1,5 @@
 # sql/visitors.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -33,10 +33,8 @@ from ..util import symbol
 
 __all__ = [
     "iterate",
-    "iterate_depthfirst",
     "traverse_using",
     "traverse",
-    "traverse_depthfirst",
     "cloned_traverse",
     "replacement_traverse",
     "Traversible",
@@ -53,38 +51,38 @@ def _generate_compiler_dispatch(cls):
     """
     visit_name = cls.__visit_name__
 
-    if isinstance(visit_name, util.compat.string_types):
-        # There is an optimization opportunity here because the
-        # the string name of the class's __visit_name__ is known at
-        # this early stage (import time) so it can be pre-constructed.
-        getter = operator.attrgetter("visit_%s" % visit_name)
+    if "_compiler_dispatch" in cls.__dict__:
+        # class has a fixed _compiler_dispatch() method.
+        # copy it to "original" so that we can get it back if
+        # sqlalchemy.ext.compiles overrides it.
+        cls._original_compiler_dispatch = cls._compiler_dispatch
+        return
 
-        def _compiler_dispatch(self, visitor, **kw):
-            try:
-                meth = getter(visitor)
-            except AttributeError:
-                raise exc.UnsupportedCompilationError(visitor, cls)
-            else:
-                return meth(self, **kw)
+    if not isinstance(visit_name, util.compat.string_types):
+        raise exc.InvalidRequestError(
+            "__visit_name__ on class %s must be a string at the class level"
+            % cls.__name__
+        )
 
-    else:
-        # The optimization opportunity is lost for this case because the
-        # __visit_name__ is not yet a string. As a result, the visit
-        # string has to be recalculated with each compilation.
-        def _compiler_dispatch(self, visitor, **kw):
-            visit_attr = "visit_%s" % self.__visit_name__
-            try:
-                meth = getattr(visitor, visit_attr)
-            except AttributeError:
-                raise exc.UnsupportedCompilationError(visitor, cls)
-            else:
-                return meth(self, **kw)
+    name = "visit_%s" % visit_name
+    getter = operator.attrgetter(name)
 
-    _compiler_dispatch.__doc__ = """Look for an attribute named "visit_"
-        + self.__visit_name__ on the visitor, and call it with the same
-        kw params.
+    def _compiler_dispatch(self, visitor, **kw):
+        """Look for an attribute named "visit_<visit_name>" on the
+        visitor, and call it with the same kw params.
+
         """
-    cls._compiler_dispatch = _compiler_dispatch
+        try:
+            meth = getter(visitor)
+        except AttributeError as err:
+            return visitor.visit_unsupported_compilation(self, err, **kw)
+
+        else:
+            return meth(self, **kw)
+
+    cls._compiler_dispatch = (
+        cls._original_compiler_dispatch
+    ) = _compiler_dispatch
 
 
 class TraversibleType(type):
@@ -180,7 +178,7 @@ class InternalTraversal(util.with_metaclass(_InternalTraversalType, object)):
         ]
 
     Above, the :class:`.Case` class indicates its internal state as the
-    attribtues named ``value``, ``whens``, and ``else\_``.    They each
+    attributes named ``value``, ``whens``, and ``else_``.    They each
     link to an :class:`.InternalTraversal` method which indicates the type
     of datastructure referred towards.
 
@@ -216,53 +214,66 @@ class InternalTraversal(util.with_metaclass(_InternalTraversalType, object)):
         try:
             dispatcher = target.__class__.__dict__[generate_dispatcher_name]
         except KeyError:
+            # most of the dispatchers are generated up front
+            # in sqlalchemy/sql/__init__.py ->
+            # traversals.py-> _preconfigure_traversals().
+            # this block will generate any remaining dispatchers.
             dispatcher = self.generate_dispatch(
-                target, internal_dispatch, generate_dispatcher_name
+                target.__class__, internal_dispatch, generate_dispatcher_name
             )
         return dispatcher(target, self)
 
     def generate_dispatch(
-        self, target, internal_dispatch, generate_dispatcher_name
+        self, target_cls, internal_dispatch, generate_dispatcher_name
     ):
         dispatcher = _generate_dispatcher(
             self, internal_dispatch, generate_dispatcher_name
         )
-        setattr(target.__class__, generate_dispatcher_name, dispatcher)
+        # assert isinstance(target_cls, type)
+        setattr(target_cls, generate_dispatcher_name, dispatcher)
         return dispatcher
 
     dp_has_cache_key = symbol("HC")
     """Visit a :class:`.HasCacheKey` object."""
 
+    dp_has_cache_key_list = symbol("HL")
+    """Visit a list of :class:`.HasCacheKey` objects."""
+
     dp_clauseelement = symbol("CE")
-    """Visit a :class:`.ClauseElement` object."""
+    """Visit a :class:`_expression.ClauseElement` object."""
 
     dp_fromclause_canonical_column_collection = symbol("FC")
-    """Visit a :class:`.FromClause` object in the context of the
+    """Visit a :class:`_expression.FromClause` object in the context of the
     ``columns`` attribute.
 
     The column collection is "canonical", meaning it is the originally
     defined location of the :class:`.ColumnClause` objects.   Right now
-    this means that the object being visited is a :class:`.TableClause`
-    or :class:`.Table` object only.
+    this means that the object being visited is a
+    :class:`_expression.TableClause`
+    or :class:`_schema.Table` object only.
 
     """
 
-    dp_clauseelement_tuples = symbol("CT")
-    """Visit a list of tuples which contain :class:`.ClauseElement`
+    dp_clauseelement_tuples = symbol("CTS")
+    """Visit a list of tuples which contain :class:`_expression.ClauseElement`
     objects.
 
     """
 
     dp_clauseelement_list = symbol("CL")
-    """Visit a list of :class:`.ClauseElement` objects.
+    """Visit a list of :class:`_expression.ClauseElement` objects.
 
     """
 
-    dp_clauseelement_unordered_set = symbol("CU")
-    """Visit an unordered set of :class:`.ClauseElement` objects. """
+    dp_clauseelement_tuple = symbol("CT")
+    """Visit a tuple of :class:`_expression.ClauseElement` objects.
+
+    """
+
+    dp_executable_options = symbol("EO")
 
     dp_fromclause_ordered_set = symbol("CO")
-    """Visit an ordered set of :class:`.FromClause` objects. """
+    """Visit an ordered set of :class:`_expression.FromClause` objects. """
 
     dp_string = symbol("S")
     """Visit a plain string value.
@@ -274,6 +285,9 @@ class InternalTraversal(util.with_metaclass(_InternalTraversalType, object)):
     generation.
 
     """
+
+    dp_string_list = symbol("SL")
+    """Visit a list of strings."""
 
     dp_anon_name = symbol("AN")
     """Visit a potentially "anonymized" string value.
@@ -319,8 +333,11 @@ class InternalTraversal(util.with_metaclass(_InternalTraversalType, object)):
 
     """
 
+    dp_dialect_options = symbol("DO")
+    """Visit a dialect options structure."""
+
     dp_string_clauseelement_dict = symbol("CD")
-    """Visit a dictionary of string keys to :class:`.ClauseElement`
+    """Visit a dictionary of string keys to :class:`_expression.ClauseElement`
     objects.
 
     """
@@ -328,6 +345,17 @@ class InternalTraversal(util.with_metaclass(_InternalTraversalType, object)):
     dp_string_multi_dict = symbol("MD")
     """Visit a dictionary of string keys to values which may either be
     plain immutable/hashable or :class:`.HasCacheKey` objects.
+
+    """
+
+    dp_annotations_key = symbol("AK")
+    """Visit the _annotations_cache_key element.
+
+    This is a dictionary of additional information about a ClauseElement
+    that modifies its role.  It should be included when comparing or caching
+    objects, however generating this key is relatively expensive.   Visitors
+    should check the "_annotations" dict for non-None first before creating
+    this key.
 
     """
 
@@ -350,18 +378,22 @@ class InternalTraversal(util.with_metaclass(_InternalTraversalType, object)):
     """
 
     dp_prefix_sequence = symbol("PS")
-    """Visit the sequence represented by :class:`.HasPrefixes`
-    or :class:`.HasSuffixes`.
+    """Visit the sequence represented by :class:`_expression.HasPrefixes`
+    or :class:`_expression.HasSuffixes`.
 
     """
 
     dp_table_hint_list = symbol("TH")
-    """Visit the ``_hints`` collection of a :class:`.Select` object.
+    """Visit the ``_hints`` collection of a :class:`_expression.Select`
+    object.
 
     """
 
+    dp_setup_join_tuple = symbol("SJ")
+
     dp_statement_hint_list = symbol("SH")
-    """Visit the ``_statement_hints`` collection of a :class:`.Select`
+    """Visit the ``_statement_hints`` collection of a
+    :class:`_expression.Select`
     object.
 
     """
@@ -371,11 +403,31 @@ class InternalTraversal(util.with_metaclass(_InternalTraversalType, object)):
 
     """
 
+    dp_dml_ordered_values = symbol("DML_OV")
+    """Visit the values() ordered tuple list of an
+    :class:`_expression.Update` object."""
+
+    dp_dml_values = symbol("DML_V")
+    """Visit the values() dictionary of a :class:`.ValuesBase`
+    (e.g. Insert or Update) object.
+
+    """
+
+    dp_dml_multi_values = symbol("DML_MV")
+    """Visit the values() multi-valued list of dictionaries of an
+    :class:`_expression.Insert` object.
+
+    """
+
+    dp_propagate_attrs = symbol("PA")
+    """Visit the propagate attrs dict.   this hardcodes to the particular
+    elements we care about right now."""
+
 
 class ExtendedInternalTraversal(InternalTraversal):
     """defines additional symbols that are useful in caching applications.
 
-    Traversals for :class:`.ClauseElement` objects only need to use
+    Traversals for :class:`_expression.ClauseElement` objects only need to use
     those symbols present in :class:`.InternalTraversal`.  However, for
     additional caching use cases within the ORM, symbols dealing with the
     :class:`.HasCacheKey` class are added here.
@@ -408,9 +460,6 @@ class ExtendedInternalTraversal(InternalTraversal):
 
     """
 
-    dp_has_cache_key_list = symbol("HL")
-    """Visit a list of :class:`.HasCacheKey` objects."""
-
     dp_inspectable_list = symbol("IL")
     """Visit a list of inspectable objects which upon inspection are
     HasCacheKey objects."""
@@ -434,14 +483,14 @@ class ExternalTraversal(object):
                 return meth(obj, **kw)
 
     def iterate(self, obj):
-        """traverse the given expression structure, returning an iterator
+        """Traverse the given expression structure, returning an iterator
         of all elements.
 
         """
         return iterate(obj, self.__traverse_options__)
 
     def traverse(self, obj):
-        """traverse and visit the given expression structure."""
+        """Traverse and visit the given expression structure."""
 
         return traverse(obj, self.__traverse_options__, self._visitor_dict)
 
@@ -456,7 +505,7 @@ class ExternalTraversal(object):
 
     @property
     def visitor_iterator(self):
-        """iterate through this visitor and each 'chained' visitor."""
+        """Iterate through this visitor and each 'chained' visitor."""
 
         v = self
         while v:
@@ -464,9 +513,9 @@ class ExternalTraversal(object):
             v = getattr(v, "_next", None)
 
     def chain(self, visitor):
-        """'chain' an additional ClauseVisitor onto this ClauseVisitor.
+        """'Chain' an additional ClauseVisitor onto this ClauseVisitor.
 
-        the chained visitor will receive all visit events after this one.
+        The chained visitor will receive all visit events after this one.
 
         """
         tail = list(self.visitor_iterator)[-1]
@@ -492,7 +541,7 @@ class CloningExternalTraversal(ExternalTraversal):
         return [self.traverse(x) for x in list_]
 
     def traverse(self, obj):
-        """traverse and visit the given expression structure."""
+        """Traverse and visit the given expression structure."""
 
         return cloned_traverse(
             obj, self.__traverse_options__, self._visitor_dict
@@ -509,7 +558,7 @@ class ReplacingExternalTraversal(CloningExternalTraversal):
     """
 
     def replace(self, elem):
-        """receive pre-copied elements during a cloning traversal.
+        """Receive pre-copied elements during a cloning traversal.
 
         If the method returns a new element, the element is used
         instead of creating a simple copy of the element.  Traversal
@@ -518,7 +567,7 @@ class ReplacingExternalTraversal(CloningExternalTraversal):
         return None
 
     def traverse(self, obj):
-        """traverse and visit the given expression structure."""
+        """Traverse and visit the given expression structure."""
 
         def replace(elem):
             for v in self.visitor_iterator:
@@ -537,86 +586,56 @@ CloningVisitor = CloningExternalTraversal
 ReplacingCloningVisitor = ReplacingExternalTraversal
 
 
-def iterate(obj, opts):
-    r"""traverse the given expression structure, returning an iterator.
+def iterate(obj, opts=util.immutabledict()):
+    r"""Traverse the given expression structure, returning an iterator.
 
-    traversal is configured to be breadth-first.
+    Traversal is configured to be breadth-first.
 
-    The central API feature used by the :func:`.visitors.iterate` and
-    :func:`.visitors.iterate_depthfirst` functions is the
-    :meth:`.ClauseElement.get_children` method of :class:`.ClauseElement`
-    objects.  This method should return all the :class:`.ClauseElement` objects
-    which are associated with a particular :class:`.ClauseElement` object.
-    For example, a :class:`.Case` structure will refer to a series of
-    :class:`.ColumnElement` objects within its "whens" and "else\_" member
-    variables.
+    The central API feature used by the :func:`.visitors.iterate`
+    function is the
+    :meth:`_expression.ClauseElement.get_children` method of
+    :class:`_expression.ClauseElement` objects.  This method should return all
+    the :class:`_expression.ClauseElement` objects which are associated with a
+    particular :class:`_expression.ClauseElement` object. For example, a
+    :class:`.Case` structure will refer to a series of
+    :class:`_expression.ColumnElement` objects within its "whens" and "else\_"
+    member variables.
 
-    :param obj: :class:`.ClauseElement` structure to be traversed
+    :param obj: :class:`_expression.ClauseElement` structure to be traversed
 
     :param opts: dictionary of iteration options.   This dictionary is usually
      empty in modern usage.
 
     """
-    # fasttrack for atomic elements like columns
+    yield obj
     children = obj.get_children(**opts)
+
     if not children:
-        return [obj]
+        return
 
-    traversal = deque()
-    stack = deque([obj])
+    stack = deque([children])
     while stack:
-        t = stack.popleft()
-        traversal.append(t)
-        for c in t.get_children(**opts):
-            stack.append(c)
-    return iter(traversal)
-
-
-def iterate_depthfirst(obj, opts):
-    """traverse the given expression structure, returning an iterator.
-
-    traversal is configured to be depth-first.
-
-    :param obj: :class:`.ClauseElement` structure to be traversed
-
-    :param opts: dictionary of iteration options.   This dictionary is usually
-     empty in modern usage.
-
-    .. seealso::
-
-        :func:`.visitors.iterate` - includes a general overview of iteration.
-
-    """
-    # fasttrack for atomic elements like columns
-    children = obj.get_children(**opts)
-    if not children:
-        return [obj]
-
-    stack = deque([obj])
-    traversal = deque()
-    while stack:
-        t = stack.pop()
-        traversal.appendleft(t)
-        for c in t.get_children(**opts):
-            stack.append(c)
-    return iter(traversal)
+        t_iterator = stack.popleft()
+        for t in t_iterator:
+            yield t
+            stack.append(t.get_children(**opts))
 
 
 def traverse_using(iterator, obj, visitors):
-    """visit the given expression structure using the given iterator of
+    """Visit the given expression structure using the given iterator of
     objects.
 
     :func:`.visitors.traverse_using` is usually called internally as the result
-    of the :func:`.visitors.traverse` or :func:`.visitors.traverse_depthfirst`
-    functions.
+    of the :func:`.visitors.traverse` function.
 
     :param iterator: an iterable or sequence which will yield
-     :class:`.ClauseElement` structures; the iterator is assumed to be the
-     product of the :func:`.visitors.iterate` or
-     :func:`.visitors.iterate_depthfirst` functions.
+     :class:`_expression.ClauseElement`
+     structures; the iterator is assumed to be the
+     product of the :func:`.visitors.iterate` function.
 
-    :param obj: the :class:`.ClauseElement` that was used as the target of the
-     :func:`.iterate` or :func:`.iterate_depthfirst` function.
+    :param obj: the :class:`_expression.ClauseElement`
+     that was used as the target of the
+     :func:`.iterate` function.
 
     :param visitors: dictionary of visit functions.  See :func:`.traverse`
      for details on this dictionary.
@@ -625,7 +644,6 @@ def traverse_using(iterator, obj, visitors):
 
         :func:`.traverse`
 
-        :func:`.traverse_depthfirst`
 
     """
     for target in iterator:
@@ -636,14 +654,14 @@ def traverse_using(iterator, obj, visitors):
 
 
 def traverse(obj, opts, visitors):
-    """traverse and visit the given expression structure using the default
+    """Traverse and visit the given expression structure using the default
     iterator.
 
      e.g.::
 
         from sqlalchemy.sql import visitors
 
-        stmt = select([some_table]).where(some_table.c.foo == 'bar')
+        stmt = select(some_table).where(some_table.c.foo == 'bar')
 
         def visit_bindparam(bind_param):
             print("found bound value: %s" % bind_param.value)
@@ -653,7 +671,7 @@ def traverse(obj, opts, visitors):
     The iteration of objects uses the :func:`.visitors.iterate` function,
     which does a breadth-first traversal using a stack.
 
-    :param obj: :class:`.ClauseElement` structure to be traversed
+    :param obj: :class:`_expression.ClauseElement` structure to be traversed
 
     :param opts: dictionary of iteration options.   This dictionary is usually
      empty in modern usage.
@@ -668,22 +686,8 @@ def traverse(obj, opts, visitors):
     return traverse_using(iterate(obj, opts), obj, visitors)
 
 
-def traverse_depthfirst(obj, opts, visitors):
-    """traverse and visit the given expression structure using the
-    depth-first iterator.
-
-    The iteration of objects uses the :func:`.visitors.iterate_depthfirst`
-    function, which does a depth-first traversal using a stack.
-
-    Usage is the same as that of :func:`.visitors.traverse` function.
-
-
-    """
-    return traverse_using(iterate_depthfirst(obj, opts), obj, visitors)
-
-
 def cloned_traverse(obj, opts, visitors):
-    """clone the given expression structure, allowing modifications by
+    """Clone the given expression structure, allowing modifications by
     visitors.
 
     Traversal usage is the same as that of :func:`.visitors.traverse`.
@@ -692,9 +696,12 @@ def cloned_traverse(obj, opts, visitors):
 
     The central API feature used by the :func:`.visitors.cloned_traverse`
     and :func:`.visitors.replacement_traverse` functions, in addition to the
-    :meth:`.ClauseElement.get_children` function that is used to achieve
-    the iteration, is the :meth:`.ClauseElement._copy_internals` method.
-    For a :class:`.ClauseElement` structure to support cloning and replacement
+    :meth:`_expression.ClauseElement.get_children`
+    function that is used to achieve
+    the iteration, is the :meth:`_expression.ClauseElement._copy_internals`
+    method.
+    For a :class:`_expression.ClauseElement`
+    structure to support cloning and replacement
     traversals correctly, it needs to be able to pass a cloning function into
     its internal members in order to make copies of them.
 
@@ -708,6 +715,9 @@ def cloned_traverse(obj, opts, visitors):
 
     cloned = {}
     stop_on = set(opts.get("stop_on", []))
+
+    def deferred_copy_internals(obj):
+        return cloned_traverse(obj, opts, visitors)
 
     def clone(elem, **kw):
         if elem in stop_on:
@@ -729,20 +739,20 @@ def cloned_traverse(obj, opts, visitors):
             return cloned[id(elem)]
 
     if obj is not None:
-        obj = clone(obj)
+        obj = clone(obj, deferred_copy_internals=deferred_copy_internals)
     clone = None  # remove gc cycles
     return obj
 
 
 def replacement_traverse(obj, opts, replace):
-    """clone the given expression structure, allowing element
+    """Clone the given expression structure, allowing element
     replacement by a given replacement function.
 
     This function is very similar to the :func:`.visitors.cloned_traverse`
     function, except instead of being passed a dictionary of visitors, all
     elements are unconditionally passed into the given replace function.
     The replace function then has the option to return an entirely new object
-    which will replace the one given.  if it returns ``None``, then the object
+    which will replace the one given.  If it returns ``None``, then the object
     is kept in place.
 
     The difference in usage between :func:`.visitors.cloned_traverse` and
@@ -761,6 +771,9 @@ def replacement_traverse(obj, opts, replace):
     cloned = {}
     stop_on = {id(x) for x in opts.get("stop_on", [])}
 
+    def deferred_copy_internals(obj):
+        return replacement_traverse(obj, opts, replace)
+
     def clone(elem, **kw):
         if (
             id(elem) in stop_on
@@ -773,19 +786,24 @@ def replacement_traverse(obj, opts, replace):
                 stop_on.add(id(newelem))
                 return newelem
             else:
-
-                if elem not in cloned:
+                # base "already seen" on id(), not hash, so that we don't
+                # replace an Annotated element with its non-annotated one, and
+                # vice versa
+                id_elem = id(elem)
+                if id_elem not in cloned:
                     if "replace" in kw:
                         newelem = kw["replace"](elem)
                         if newelem is not None:
-                            cloned[elem] = newelem
+                            cloned[id_elem] = newelem
                             return newelem
 
-                    cloned[elem] = newelem = elem._clone()
+                    cloned[id_elem] = newelem = elem._clone()
                     newelem._copy_internals(clone=clone, **kw)
-                return cloned[elem]
+                return cloned[id_elem]
 
     if obj is not None:
-        obj = clone(obj, **opts)
+        obj = clone(
+            obj, deferred_copy_internals=deferred_copy_internals, **opts
+        )
     clone = None  # remove gc cycles
     return obj

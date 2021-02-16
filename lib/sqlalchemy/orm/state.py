@@ -1,5 +1,5 @@
 # orm/state.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -47,7 +47,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
     status within a particular :class:`.Session` and details
     about data on individual attributes.  The public API
     in order to acquire a :class:`.InstanceState` object
-    is to use the :func:`.inspect` system::
+    is to use the :func:`_sa.inspect` system::
 
         >>> from sqlalchemy import inspect
         >>> insp = inspect(some_mapped_object)
@@ -119,7 +119,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
     @property
     def transient(self):
-        """Return true if the object is :term:`transient`.
+        """Return ``True`` if the object is :term:`transient`.
 
         .. seealso::
 
@@ -130,7 +130,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
     @property
     def pending(self):
-        """Return true if the object is :term:`pending`.
+        """Return ``True`` if the object is :term:`pending`.
 
 
         .. seealso::
@@ -142,7 +142,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
     @property
     def deleted(self):
-        """Return true if the object is :term:`deleted`.
+        """Return ``True`` if the object is :term:`deleted`.
 
         An object that is in the deleted state is guaranteed to
         not be within the :attr:`.Session.identity_map` of its parent
@@ -196,7 +196,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
     @property
     def persistent(self):
-        """Return true if the object is :term:`persistent`.
+        """Return ``True`` if the object is :term:`persistent`.
 
         An object that is in the persistent state is guaranteed to
         be within the :attr:`.Session.identity_map` of its parent
@@ -212,12 +212,12 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
             :ref:`session_object_states`
 
-            """
+        """
         return self.key is not None and self._attached and not self._deleted
 
     @property
     def detached(self):
-        """Return true if the object is :term:`detached`.
+        """Return ``True`` if the object is :term:`detached`.
 
         .. seealso::
 
@@ -227,11 +227,11 @@ class InstanceState(interfaces.InspectionAttrInfo):
         return self.key is not None and not self._attached
 
     @property
-    @util.dependencies("sqlalchemy.orm.session")
-    def _attached(self, sessionlib):
+    @util.preload_module("sqlalchemy.orm.session")
+    def _attached(self):
         return (
             self.session_id is not None
-            and self.session_id in sessionlib._sessions
+            and self.session_id in util.preloaded.orm_session._sessions
         )
 
     def _track_last_known_value(self, key):
@@ -247,8 +247,8 @@ class InstanceState(interfaces.InspectionAttrInfo):
             self._last_known_values[key] = NO_VALUE
 
     @property
-    @util.dependencies("sqlalchemy.orm.session")
-    def session(self, sessionlib):
+    @util.preload_module("sqlalchemy.orm.session")
+    def session(self):
         """Return the owning :class:`.Session` for this instance,
         or ``None`` if none available.
 
@@ -260,7 +260,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
         fully detached under normal circumstances.
 
         """
-        return sessionlib._state_session(self)
+        return util.preloaded.orm_session._state_session(self)
 
     @property
     def object(self):
@@ -273,7 +273,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
         """Return the mapped identity of the mapped object.
         This is the primary key identity as persisted by the ORM
         which can always be passed directly to
-        :meth:`.Query.get`.
+        :meth:`_query.Query.get`.
 
         Returns ``None`` if the object has no primary key identity.
 
@@ -316,7 +316,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
     @util.memoized_property
     def mapper(self):
-        """Return the :class:`.Mapper` used for this mapped object."""
+        """Return the :class:`_orm.Mapper` used for this mapped object."""
         return self.manager.mapper
 
     @property
@@ -324,7 +324,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
         """Return ``True`` if this object has an identity key.
 
         This should always have the same value as the
-        expression ``state.persistent or state.detached``.
+        expression ``state.persistent`` or ``state.detached``.
 
         """
         return bool(self.key)
@@ -352,21 +352,13 @@ class InstanceState(interfaces.InspectionAttrInfo):
             if persistent:
                 if to_transient:
                     if persistent_to_transient is not None:
-                        obj = state.obj()
-                        if obj is not None:
-                            persistent_to_transient(session, obj)
+                        persistent_to_transient(session, state)
                 elif persistent_to_detached is not None:
-                    obj = state.obj()
-                    if obj is not None:
-                        persistent_to_detached(session, obj)
+                    persistent_to_detached(session, state)
             elif deleted and deleted_to_detached is not None:
-                obj = state.obj()
-                if obj is not None:
-                    deleted_to_detached(session, obj)
+                deleted_to_detached(session, state)
             elif pending and pending_to_transient is not None:
-                obj = state.obj()
-                if obj is not None:
-                    pending_to_transient(session, obj)
+                pending_to_transient(session, state)
 
             state._strong_obj = None
 
@@ -541,7 +533,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
     def _reset(self, dict_, key):
         """Remove the given attribute and any
-           callables associated with it."""
+        callables associated with it."""
 
         old = dict_.pop(key, None)
         if old is not None and self.manager[key].impl.collection:
@@ -578,7 +570,6 @@ class InstanceState(interfaces.InspectionAttrInfo):
 
     def _expire(self, dict_, modified_set):
         self.expired = True
-
         if self.modified:
             modified_set.discard(self)
             self.committed_state.clear()
@@ -673,7 +664,7 @@ class InstanceState(interfaces.InspectionAttrInfo):
             if not self.manager[attr].impl.load_on_unexpire
         )
 
-        self.manager.expired_attribute_loader(self, toload)
+        self.manager.expired_attribute_loader(self, toload, passive)
 
         # if the loader failed, or this
         # instance state didn't have an identity,
@@ -903,7 +894,8 @@ class AttributeState(object):
             The attribute history system tracks changes on a **per flush
             basis**. Each time the :class:`.Session` is flushed, the history
             of each attribute is reset to empty.   The :class:`.Session` by
-            default autoflushes each time a :class:`.Query` is invoked.  For
+            default autoflushes each time a :class:`_query.Query` is invoked.
+            For
             options on how to control this, see :ref:`session_flushing`.
 
 
@@ -929,7 +921,8 @@ class AttributeState(object):
             The attribute history system tracks changes on a **per flush
             basis**. Each time the :class:`.Session` is flushed, the history
             of each attribute is reset to empty.   The :class:`.Session` by
-            default autoflushes each time a :class:`.Query` is invoked.  For
+            default autoflushes each time a :class:`_query.Query` is invoked.
+            For
             options on how to control this, see :ref:`session_flushing`.
 
         .. seealso::

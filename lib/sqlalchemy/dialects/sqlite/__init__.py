@@ -1,12 +1,11 @@
 # sqlite/__init__.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
 # the MIT License: http://www.opensource.org/licenses/mit-license.php
 
 from . import base  # noqa
-from . import provision  # noqa
 from . import pysqlcipher  # noqa
 from . import pysqlite  # noqa
 from .base import BLOB
@@ -25,7 +24,8 @@ from .base import TEXT
 from .base import TIME
 from .base import TIMESTAMP
 from .base import VARCHAR
-
+from .dml import Insert
+from .dml import insert
 
 # default dialect
 base.dialect = dialect = pysqlite.dialect
@@ -48,5 +48,7 @@ __all__ = (
     "TIMESTAMP",
     "VARCHAR",
     "REAL",
+    "Insert",
+    "insert",
     "dialect",
 )

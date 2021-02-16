@@ -1,5 +1,5 @@
 # sql/ddl.py
-# Copyright (C) 2009-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2009-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -27,6 +27,9 @@ class _DDLCompiles(ClauseElement):
         Dialect."""
 
         return dialect.ddl_compiler(dialect, self, **kw)
+
+    def _compile_w_cache(self, *arg, **kw):
+        raise NotImplementedError()
 
 
 class DDLElement(roles.DDLRole, Executable, _DDLCompiles):
@@ -68,9 +71,21 @@ class DDLElement(roles.DDLRole, Executable, _DDLCompiles):
     dialect = None
     callable_ = None
 
-    def _execute_on_connection(self, connection, multiparams, params):
-        return connection._execute_ddl(self, multiparams, params)
+    def _execute_on_connection(
+        self, connection, multiparams, params, execution_options
+    ):
+        return connection._execute_ddl(
+            self, multiparams, params, execution_options
+        )
 
+    @util.deprecated_20(
+        ":meth:`.DDLElement.execute`",
+        alternative="All statement execution in SQLAlchemy 2.0 is performed "
+        "by the :meth:`_engine.Connection.execute` method of "
+        ":class:`_engine.Connection`, "
+        "or in the ORM by the :meth:`.Session.execute` method of "
+        ":class:`.Session`.",
+    )
     def execute(self, bind=None, target=None):
         """Execute this DDL immediately.
 
@@ -86,10 +101,12 @@ class DDLElement(roles.DDLRole, Executable, _DDLCompiles):
           ``.bind`` property.
 
         :param target:
-          Optional, defaults to None.  The target SchemaItem for the
-          execute call.  Will be passed to the ``on`` callable if any,
-          and may also provide string expansion data for the
-          statement. See ``execute_at`` for more information.
+          Optional, defaults to None.  The target :class:`_schema.SchemaItem`
+          for the execute call.   This is equivalent to passing the
+          :class:`_schema.SchemaItem` to the :meth:`.DDLElement.against`
+          method and then invoking :meth:`_schema.DDLElement.execute`
+          upon the resulting :class:`_schema.DDLElement` object.  See
+          :meth:`.DDLElement.against` for further detail.
 
         """
 
@@ -103,14 +120,44 @@ class DDLElement(roles.DDLRole, Executable, _DDLCompiles):
 
     @_generative
     def against(self, target):
-        """Return a copy of this DDL against a specific schema item."""
+        """Return a copy of this :class:`_schema.DDLElement` which will include
+        the given target.
+
+        This essentially applies the given item to the ``.target`` attribute
+        of the returned :class:`_schema.DDLElement` object.  This target
+        is then usable by event handlers and compilation routines in order to
+        provide services such as tokenization of a DDL string in terms of a
+        particular :class:`_schema.Table`.
+
+        When a :class:`_schema.DDLElement` object is established as an event
+        handler for the :meth:`_events.DDLEvents.before_create` or
+        :meth:`_events.DDLEvents.after_create` events, and the event
+        then occurs for a given target such as a :class:`_schema.Constraint`
+        or :class:`_schema.Table`, that target is established with a copy
+        of the :class:`_schema.DDLElement` object using this method, which
+        then proceeds to the :meth:`_schema.DDLElement.execute` method
+        in order to invoke the actual DDL instruction.
+
+        :param target: a :class:`_schema.SchemaItem` that will be the subject
+         of a DDL operation.
+
+        :return: a copy of this :class:`_schema.DDLElement` with the
+         ``.target`` attribute assigned to the given
+         :class:`_schema.SchemaItem`.
+
+        .. seealso::
+
+            :class:`_schema.DDL` - uses tokenization against the "target" when
+            processing the DDL string.
+
+        """
 
         self.target = target
 
     @_generative
     def execute_if(self, dialect=None, callable_=None, state=None):
         r"""Return a callable that will execute this
-        DDLElement conditionally.
+        :class:`_ddl.DDLElement` conditionally within an event handler.
 
         Used to provide a wrapper for event listening::
 
@@ -138,12 +185,13 @@ class DDLElement(roles.DDLRole, Executable, _DDLCompiles):
               This DDL element.
 
             :target:
-              The :class:`.Table` or :class:`.MetaData` object which is the
+              The :class:`_schema.Table` or :class:`_schema.MetaData`
+              object which is the
               target of this event. May be None if the DDL is executed
               explicitly.
 
             :bind:
-              The :class:`.Connection` being used for DDL execution
+              The :class:`_engine.Connection` being used for DDL execution
 
             :tables:
               Optional keyword argument - a list of Table objects which are to
@@ -159,7 +207,7 @@ class DDLElement(roles.DDLRole, Executable, _DDLCompiles):
              set during the call to ``create()``, ``create_all()``,
              ``drop()``, ``drop_all()``.
 
-          If the callable returns a true value, the DDL statement will be
+          If the callable returns a True value, the DDL statement will be
           executed.
 
         :param state: any value which will be passed to the callable\_
@@ -216,8 +264,9 @@ class DDL(DDLElement):
 
     Specifies literal SQL DDL to be executed by the database.  DDL objects
     function as DDL event listeners, and can be subscribed to those events
-    listed in :class:`.DDLEvents`, using either :class:`.Table` or
-    :class:`.MetaData` objects as targets.   Basic templating support allows
+    listed in :class:`.DDLEvents`, using either :class:`_schema.Table` or
+    :class:`_schema.MetaData` objects as targets.
+    Basic templating support allows
     a single DDL instance to handle repetitive tasks for multiple tables.
 
     Examples::
@@ -248,6 +297,13 @@ class DDL(DDLElement):
 
     __visit_name__ = "ddl"
 
+    @util.deprecated_params(
+        bind=(
+            "2.0",
+            "The :paramref:`_ddl.DDL.bind` argument is deprecated and "
+            "will be removed in SQLAlchemy 2.0.",
+        ),
+    )
     def __init__(self, statement, context=None, bind=None):
         """Create a DDL statement.
 
@@ -313,9 +369,33 @@ class _CreateDropBase(DDLElement):
 
     """
 
-    def __init__(self, element, bind=None):
+    @util.deprecated_params(
+        bind=(
+            "2.0",
+            "The :paramref:`_ddl.DDLElement.bind` argument is "
+            "deprecated and "
+            "will be removed in SQLAlchemy 2.0.",
+        ),
+    )
+    def __init__(
+        self,
+        element,
+        bind=None,
+        if_exists=False,
+        if_not_exists=False,
+        _legacy_bind=None,
+    ):
         self.element = element
-        self.bind = bind
+        if bind:
+            self.bind = bind
+        elif _legacy_bind:
+            self.bind = _legacy_bind
+        self.if_exists = if_exists
+        self.if_not_exists = if_not_exists
+
+    @property
+    def stringify_dialect(self):
+        return self.element.create_drop_stringify_dialect
 
     def _create_rule_disable(self, compiler):
         """Allow disable of _create_rule using a callable.
@@ -366,24 +446,42 @@ class CreateTable(_CreateDropBase):
 
     __visit_name__ = "create_table"
 
+    @util.deprecated_params(
+        bind=(
+            "2.0",
+            "The :paramref:`_ddl.CreateTable.bind` argument is deprecated and "
+            "will be removed in SQLAlchemy 2.0.",
+        ),
+    )
     def __init__(
-        self, element, bind=None, include_foreign_key_constraints=None
+        self,
+        element,
+        bind=None,
+        include_foreign_key_constraints=None,
+        if_not_exists=False,
     ):
         """Create a :class:`.CreateTable` construct.
 
-        :param element: a :class:`.Table` that's the subject
+        :param element: a :class:`_schema.Table` that's the subject
          of the CREATE
         :param on: See the description for 'on' in :class:`.DDL`.
         :param bind: See the description for 'bind' in :class:`.DDL`.
         :param include_foreign_key_constraints: optional sequence of
-         :class:`.ForeignKeyConstraint` objects that will be included
+         :class:`_schema.ForeignKeyConstraint` objects that will be included
          inline within the CREATE construct; if omitted, all foreign key
          constraints that do not specify use_alter=True are included.
 
          .. versionadded:: 1.0.0
 
+        :param if_not_exists: if True, an IF NOT EXISTS operator will be
+         applied to the construct.
+
+         .. versionadded:: 1.4.0b2
+
         """
-        super(CreateTable, self).__init__(element, bind=bind)
+        super(CreateTable, self).__init__(
+            element, _legacy_bind=bind, if_not_exists=if_not_exists
+        )
         self.columns = [CreateColumn(column) for column in element.columns]
         self.include_foreign_key_constraints = include_foreign_key_constraints
 
@@ -400,7 +498,8 @@ class _DropView(_CreateDropBase):
 
 
 class CreateColumn(_DDLCompiles):
-    """Represent a :class:`.Column` as rendered in a CREATE TABLE statement,
+    """Represent a :class:`_schema.Column`
+    as rendered in a CREATE TABLE statement,
     via the :class:`.CreateTable` construct.
 
     This is provided to support custom column DDL within the generation
@@ -408,7 +507,7 @@ class CreateColumn(_DDLCompiles):
     compiler extension documented in :ref:`sqlalchemy.ext.compiler_toplevel`
     to extend :class:`.CreateColumn`.
 
-    Typical integration is to examine the incoming :class:`.Column`
+    Typical integration is to examine the incoming :class:`_schema.Column`
     object, and to redirect compilation if a particular flag or condition
     is found::
 
@@ -439,7 +538,8 @@ class CreateColumn(_DDLCompiles):
                             for const in column.constraints)
             return text
 
-    The above construct can be applied to a :class:`.Table` as follows::
+    The above construct can be applied to a :class:`_schema.Table`
+    as follows::
 
         from sqlalchemy import Table, Metadata, Column, Integer, String
         from sqlalchemy import schema
@@ -454,7 +554,8 @@ class CreateColumn(_DDLCompiles):
 
         metadata.create_all(conn)
 
-    Above, the directives we've added to the :attr:`.Column.info` collection
+    Above, the directives we've added to the :attr:`_schema.Column.info`
+    collection
     will be detected by our custom compilation scheme::
 
         CREATE TABLE mytable (
@@ -468,10 +569,11 @@ class CreateColumn(_DDLCompiles):
     columns when producing a ``CREATE TABLE``.  This is accomplished by
     creating a compilation rule that conditionally returns ``None``.
     This is essentially how to produce the same effect as using the
-    ``system=True`` argument on :class:`.Column`, which marks a column
+    ``system=True`` argument on :class:`_schema.Column`, which marks a column
     as an implicitly-present "system" column.
 
-    For example, suppose we wish to produce a :class:`.Table` which skips
+    For example, suppose we wish to produce a :class:`_schema.Table`
+    which skips
     rendering of the PostgreSQL ``xmin`` column against the PostgreSQL
     backend, but on other backends does render it, in anticipation of a
     triggered rule.  A conditional compilation rule could skip this name only
@@ -509,6 +611,31 @@ class DropTable(_CreateDropBase):
 
     __visit_name__ = "drop_table"
 
+    @util.deprecated_params(
+        bind=(
+            "2.0",
+            "The :paramref:`_ddl.DropTable.bind` argument is "
+            "deprecated and "
+            "will be removed in SQLAlchemy 2.0.",
+        ),
+    )
+    def __init__(self, element, bind=None, if_exists=False):
+        """Create a :class:`.DropTable` construct.
+
+        :param element: a :class:`_schema.Table` that's the subject
+         of the DROP.
+        :param on: See the description for 'on' in :class:`.DDL`.
+        :param bind: See the description for 'bind' in :class:`.DDL`.
+        :param if_exists: if True, an IF EXISTS operator will be applied to the
+         construct.
+
+         .. versionadded:: 1.4.0b2
+
+        """
+        super(DropTable, self).__init__(
+            element, _legacy_bind=bind, if_exists=if_exists
+        )
+
 
 class CreateSequence(_CreateDropBase):
     """Represent a CREATE SEQUENCE statement."""
@@ -527,11 +654,61 @@ class CreateIndex(_CreateDropBase):
 
     __visit_name__ = "create_index"
 
+    @util.deprecated_params(
+        bind=(
+            "2.0",
+            "The :paramref:`_ddl.CreateIndex.bind` argument is "
+            "deprecated and "
+            "will be removed in SQLAlchemy 2.0.",
+        ),
+    )
+    def __init__(self, element, bind=None, if_not_exists=False):
+        """Create a :class:`.Createindex` construct.
+
+        :param element: a :class:`_schema.Index` that's the subject
+         of the CREATE.
+        :param on: See the description for 'on' in :class:`.DDL`.
+        :param bind: See the description for 'bind' in :class:`.DDL`.
+        :param if_not_exists: if True, an IF NOT EXISTS operator will be
+         applied to the construct.
+
+         .. versionadded:: 1.4.0b2
+
+        """
+        super(CreateIndex, self).__init__(
+            element, _legacy_bind=bind, if_not_exists=if_not_exists
+        )
+
 
 class DropIndex(_CreateDropBase):
     """Represent a DROP INDEX statement."""
 
     __visit_name__ = "drop_index"
+
+    @util.deprecated_params(
+        bind=(
+            "2.0",
+            "The :paramref:`_ddl.DropIndex.bind` argument is "
+            "deprecated and "
+            "will be removed in SQLAlchemy 2.0.",
+        ),
+    )
+    def __init__(self, element, bind=None, if_exists=False):
+        """Create a :class:`.DropIndex` construct.
+
+        :param element: a :class:`_schema.Index` that's the subject
+         of the DROP.
+        :param on: See the description for 'on' in :class:`.DDL`.
+        :param bind: See the description for 'bind' in :class:`.DDL`.
+        :param if_exists: if True, an IF EXISTS operator will be applied to the
+         construct.
+
+         .. versionadded:: 1.4.0b2
+
+        """
+        super(DropIndex, self).__init__(
+            element, _legacy_bind=bind, if_exists=if_exists
+        )
 
 
 class AddConstraint(_CreateDropBase):
@@ -791,7 +968,7 @@ class SchemaDropper(DDLBase):
                 util.warn(
                     "Can't sort tables for DROP; an "
                     "unresolvable foreign key "
-                    "dependency exists between tables: %s, and backend does "
+                    "dependency exists between tables: %s; and backend does "
                     "not support ALTER.  To restore at least a partial sort, "
                     "apply use_alter=True to ForeignKey and "
                     "ForeignKeyConstraint "
@@ -801,7 +978,7 @@ class SchemaDropper(DDLBase):
                 )
                 collection = [(t, ()) for t in unsorted_tables]
             else:
-                util.raise_from_cause(
+                util.raise_(
                     exc.CircularDependencyError(
                         err2.args[0],
                         err2.cycles,
@@ -818,7 +995,8 @@ class SchemaDropper(DDLBase):
                                 sorted([t.fullname for t in err2.cycles])
                             )
                         ),
-                    )
+                    ),
+                    from_=err2,
                 )
 
         seq_coll = [
@@ -938,34 +1116,56 @@ class SchemaDropper(DDLBase):
         self.connection.execute(DropSequence(sequence))
 
 
-def sort_tables(tables, skip_fn=None, extra_dependencies=None):
-    """sort a collection of :class:`.Table` objects based on dependency.
+def sort_tables(
+    tables,
+    skip_fn=None,
+    extra_dependencies=None,
+):
+    """Sort a collection of :class:`_schema.Table` objects based on
+    dependency.
 
-    This is a dependency-ordered sort which will emit :class:`.Table`
-    objects such that they will follow their dependent :class:`.Table` objects.
+    This is a dependency-ordered sort which will emit :class:`_schema.Table`
+    objects such that they will follow their dependent :class:`_schema.Table`
+    objects.
     Tables are dependent on another based on the presence of
-    :class:`.ForeignKeyConstraint` objects as well as explicit dependencies
-    added by :meth:`.Table.add_is_dependent_on`.
+    :class:`_schema.ForeignKeyConstraint`
+    objects as well as explicit dependencies
+    added by :meth:`_schema.Table.add_is_dependent_on`.
 
     .. warning::
 
-        The :func:`.sort_tables` function cannot by itself accommodate
-        automatic resolution of dependency cycles between tables, which
-        are usually caused by mutually dependent foreign key constraints.
-        To resolve these cycles, either the
-        :paramref:`.ForeignKeyConstraint.use_alter` parameter may be applied
-        to those constraints, or use the
-        :func:`.sql.sort_tables_and_constraints` function which will break
-        out foreign key constraints involved in cycles separately.
+        The :func:`._schema.sort_tables` function cannot by itself
+        accommodate automatic resolution of dependency cycles between
+        tables, which are usually caused by mutually dependent foreign key
+        constraints. When these cycles are detected, the foreign keys
+        of these tables are omitted from consideration in the sort.
+        A warning is emitted when this condition occurs, which will be an
+        exception raise in a future release.   Tables which are not part
+        of the cycle will still be returned in dependency order.
 
-    :param tables: a sequence of :class:`.Table` objects.
+        To resolve these cycles, the
+        :paramref:`_schema.ForeignKeyConstraint.use_alter` parameter may be
+        applied to those constraints which create a cycle.  Alternatively,
+        the :func:`_schema.sort_tables_and_constraints` function will
+        automatically return foreign key constraints in a separate
+        collection when cycles are detected so that they may be applied
+        to a schema separately.
+
+        .. versionchanged:: 1.3.17 - a warning is emitted when
+           :func:`_schema.sort_tables` cannot perform a proper sort due to
+           cyclical dependencies.  This will be an exception in a future
+           release.  Additionally, the sort will continue to return
+           other tables not involved in the cycle in dependency order
+           which was not the case previously.
+
+    :param tables: a sequence of :class:`_schema.Table` objects.
 
     :param skip_fn: optional callable which will be passed a
-     :class:`.ForeignKey` object; if it returns True, this
+     :class:`_schema.ForeignKey` object; if it returns True, this
      constraint will not be considered as a dependency.  Note this is
      **different** from the same parameter in
      :func:`.sort_tables_and_constraints`, which is
-     instead passed the owning :class:`.ForeignKeyConstraint` object.
+     instead passed the owning :class:`_schema.ForeignKeyConstraint` object.
 
     :param extra_dependencies: a sequence of 2-tuples of tables which will
      also be considered as dependent on each other.
@@ -974,7 +1174,7 @@ def sort_tables(tables, skip_fn=None, extra_dependencies=None):
 
         :func:`.sort_tables_and_constraints`
 
-        :meth:`.MetaData.sorted_tables` - uses this function to sort
+        :attr:`_schema.MetaData.sorted_tables` - uses this function to sort
 
 
     """
@@ -994,36 +1194,44 @@ def sort_tables(tables, skip_fn=None, extra_dependencies=None):
     return [
         t
         for (t, fkcs) in sort_tables_and_constraints(
-            tables, filter_fn=_skip_fn, extra_dependencies=extra_dependencies
+            tables,
+            filter_fn=_skip_fn,
+            extra_dependencies=extra_dependencies,
+            _warn_for_cycles=True,
         )
         if t is not None
     ]
 
 
 def sort_tables_and_constraints(
-    tables, filter_fn=None, extra_dependencies=None
+    tables, filter_fn=None, extra_dependencies=None, _warn_for_cycles=False
 ):
-    """sort a collection of :class:`.Table`  / :class:`.ForeignKeyConstraint`
+    """Sort a collection of :class:`_schema.Table`  /
+    :class:`_schema.ForeignKeyConstraint`
     objects.
 
     This is a dependency-ordered sort which will emit tuples of
     ``(Table, [ForeignKeyConstraint, ...])`` such that each
-    :class:`.Table` follows its dependent :class:`.Table` objects.
-    Remaining :class:`.ForeignKeyConstraint` objects that are separate due to
+    :class:`_schema.Table` follows its dependent :class:`_schema.Table`
+    objects.
+    Remaining :class:`_schema.ForeignKeyConstraint`
+    objects that are separate due to
     dependency rules not satisfied by the sort are emitted afterwards
     as ``(None, [ForeignKeyConstraint ...])``.
 
     Tables are dependent on another based on the presence of
-    :class:`.ForeignKeyConstraint` objects, explicit dependencies
-    added by :meth:`.Table.add_is_dependent_on`, as well as dependencies
+    :class:`_schema.ForeignKeyConstraint` objects, explicit dependencies
+    added by :meth:`_schema.Table.add_is_dependent_on`,
+    as well as dependencies
     stated here using the :paramref:`~.sort_tables_and_constraints.skip_fn`
     and/or :paramref:`~.sort_tables_and_constraints.extra_dependencies`
     parameters.
 
-    :param tables: a sequence of :class:`.Table` objects.
+    :param tables: a sequence of :class:`_schema.Table` objects.
 
     :param filter_fn: optional callable which will be passed a
-     :class:`.ForeignKeyConstraint` object, and returns a value based on
+     :class:`_schema.ForeignKeyConstraint` object,
+     and returns a value based on
      whether this constraint should definitely be included or excluded as
      an inline constraint, or neither.   If it returns False, the constraint
      will definitely be included as a dependency that cannot be subject
@@ -1076,13 +1284,23 @@ def sort_tables_and_constraints(
             topological.sort(
                 fixed_dependencies.union(mutable_dependencies),
                 tables,
-                deterministic_order=True,
             )
         )
     except exc.CircularDependencyError as err:
+        if _warn_for_cycles:
+            util.warn(
+                "Cannot correctly sort tables; there are unresolvable cycles "
+                'between tables "%s", which is usually caused by mutually '
+                "dependent foreign key constraints.  Foreign key constraints "
+                "involving these tables will not be considered; this warning "
+                "may raise an error in a future release."
+                % (", ".join(sorted(t.fullname for t in err.cycles)),)
+            )
         for edge in err.edges:
             if edge in mutable_dependencies:
                 table = edge[1]
+                if table not in err.cycles:
+                    continue
                 can_remove = [
                     fkc
                     for fkc in table.foreign_key_constraints
@@ -1097,7 +1315,6 @@ def sort_tables_and_constraints(
             topological.sort(
                 fixed_dependencies.union(mutable_dependencies),
                 tables,
-                deterministic_order=True,
             )
         )
 

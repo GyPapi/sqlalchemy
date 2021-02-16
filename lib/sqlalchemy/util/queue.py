@@ -1,5 +1,5 @@
 # util/queue.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -21,7 +21,12 @@ condition.
 from collections import deque
 from time import time as _time
 
+from . import compat
 from .compat import threading
+from .concurrency import asyncio
+from .concurrency import await_fallback
+from .concurrency import await_only
+from .langhelpers import memoized_property
 
 
 __all__ = ["Empty", "Full", "Queue"]
@@ -196,3 +201,91 @@ class Queue:
         else:
             # FIFO
             return self.queue.popleft()
+
+
+class AsyncAdaptedQueue:
+    await_ = staticmethod(await_only)
+
+    def __init__(self, maxsize=0, use_lifo=False):
+        self.use_lifo = use_lifo
+        self.maxsize = maxsize
+
+    def empty(self):
+        return self._queue.empty()
+
+    def full(self):
+        return self._queue.full()
+
+    def qsize(self):
+        return self._queue.qsize()
+
+    @memoized_property
+    def _queue(self):
+        # Delay creation of the queue until it is first used, to avoid
+        # binding it to a possibly wrong event loop.
+        # By delaying the creation of the pool we accommodate the common
+        # usage pattern of instantiating the engine at module level, where a
+        # different event loop is in present compared to when the application
+        # is actually run.
+
+        if self.use_lifo:
+            queue = asyncio.LifoQueue(maxsize=self.maxsize)
+        else:
+            queue = asyncio.Queue(maxsize=self.maxsize)
+        return queue
+
+    def put_nowait(self, item):
+        try:
+            return self._queue.put_nowait(item)
+        except asyncio.QueueFull as err:
+            compat.raise_(
+                Full(),
+                replace_context=err,
+            )
+
+    def put(self, item, block=True, timeout=None):
+        if not block:
+            return self.put_nowait(item)
+
+        try:
+            if timeout is not None:
+                return self.await_(
+                    asyncio.wait_for(self._queue.put(item), timeout)
+                )
+            else:
+                return self.await_(self._queue.put(item))
+        except (asyncio.QueueFull, asyncio.TimeoutError) as err:
+            compat.raise_(
+                Full(),
+                replace_context=err,
+            )
+
+    def get_nowait(self):
+        try:
+            return self._queue.get_nowait()
+        except asyncio.QueueEmpty as err:
+            compat.raise_(
+                Empty(),
+                replace_context=err,
+            )
+
+    def get(self, block=True, timeout=None):
+        if not block:
+            return self.get_nowait()
+
+        try:
+            if timeout is not None:
+                return self.await_(
+                    asyncio.wait_for(self._queue.get(), timeout)
+                )
+            else:
+                return self.await_(self._queue.get())
+        except (asyncio.QueueEmpty, asyncio.TimeoutError) as err:
+            compat.raise_(
+                Empty(),
+                replace_context=err,
+            )
+
+
+class FallbackAsyncAdaptedQueue(AsyncAdaptedQueue):
+    await_ = staticmethod(await_fallback)

@@ -1,5 +1,5 @@
 # sqlalchemy/pool.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -18,7 +18,6 @@ from .. import event
 from .. import exc
 from .. import log
 from .. import util
-from ..util import threading
 
 
 reset_rollback = util.symbol("reset_rollback")
@@ -27,15 +26,16 @@ reset_none = util.symbol("reset_none")
 
 
 class _ConnDialect(object):
-
     """partial implementation of :class:`.Dialect`
     which provides DBAPI connection methods.
 
-    When a :class:`.Pool` is combined with an :class:`.Engine`,
-    the :class:`.Engine` replaces this with its own
+    When a :class:`_pool.Pool` is combined with an :class:`_engine.Engine`,
+    the :class:`_engine.Engine` replaces this with its own
     :class:`.Dialect`.
 
     """
+
+    is_async = False
 
     def do_rollback(self, dbapi_connection):
         dbapi_connection.rollback()
@@ -58,6 +58,8 @@ class Pool(log.Identified):
     """Abstract base class for connection pools."""
 
     _dialect = _ConnDialect()
+
+    _is_asyncio = False
 
     def __init__(
         self,
@@ -94,9 +96,9 @@ class Pool(log.Identified):
          which defaults to ``sys.stdout`` for output..   If set to the string
          ``"debug"``, the logging will include pool checkouts and checkins.
 
-         The :paramref:`.Pool.echo` parameter can also be set from the
-         :func:`.create_engine` call by using the
-         :paramref:`.create_engine.echo_pool` parameter.
+         The :paramref:`_pool.Pool.echo` parameter can also be set from the
+         :func:`_sa.create_engine` call by using the
+         :paramref:`_sa.create_engine.echo_pool` parameter.
 
          .. seealso::
 
@@ -141,17 +143,17 @@ class Pool(log.Identified):
         :param events: a list of 2-tuples, each of the form
          ``(callable, target)`` which will be passed to :func:`.event.listen`
          upon construction.   Provided here so that event listeners
-         can be assigned via :func:`.create_engine` before dialect-level
+         can be assigned via :func:`_sa.create_engine` before dialect-level
          listeners are applied.
 
         :param dialect: a :class:`.Dialect` that will handle the job
          of calling rollback(), close(), or commit() on DBAPI connections.
          If omitted, a built-in "stub" dialect is used.   Applications that
-         make use of :func:`~.create_engine` should not use this parameter
+         make use of :func:`_sa.create_engine` should not use this parameter
          as it is handled by the engine creation strategy.
 
          .. versionadded:: 1.1 - ``dialect`` is now a public parameter
-            to the :class:`.Pool`.
+            to the :class:`_pool.Pool`.
 
         :param pre_ping: if True, the pool will emit a "ping" (typically
          "SELECT 1", but is dialect-specific) on the connection
@@ -170,7 +172,6 @@ class Pool(log.Identified):
             self._orig_logging_name = None
 
         log.instance_logger(self, echoflag=echo)
-        self._threadconns = threading.local()
         self._creator = creator
         self._recycle = recycle
         self._invalidate_time = 0
@@ -264,11 +265,11 @@ class Pool(log.Identified):
             connection.invalidate(exception)
 
     def recreate(self):
-        """Return a new :class:`.Pool`, of the same class as this one
+        """Return a new :class:`_pool.Pool`, of the same class as this one
         and configured with identical creation arguments.
 
         This method is used in conjunction with :meth:`dispose`
-        to close out an entire :class:`.Pool` and create a new one in
+        to close out an entire :class:`_pool.Pool` and create a new one in
         its place.
 
         """
@@ -301,7 +302,7 @@ class Pool(log.Identified):
         return _ConnectionFairy._checkout(self)
 
     def _return_conn(self, record):
-        """Given a _ConnectionRecord, return it to the :class:`.Pool`.
+        """Given a _ConnectionRecord, return it to the :class:`_pool.Pool`.
 
         This method is called when an instrumented DBAPI connection
         has its ``close()`` method called.
@@ -326,7 +327,7 @@ class Pool(log.Identified):
 class _ConnectionRecord(object):
 
     """Internal object which maintains an individual DBAPI connection
-    referenced by a :class:`.Pool`.
+    referenced by a :class:`_pool.Pool`.
 
     The :class:`._ConnectionRecord` object always exists for any particular
     DBAPI connection whether or not that DBAPI connection has been
@@ -340,12 +341,14 @@ class _ConnectionRecord(object):
     method is called, the DBAPI connection associated with this
     :class:`._ConnectionRecord`
     will be discarded, but the :class:`._ConnectionRecord` may be used again,
-    in which case a new DBAPI connection is produced when the :class:`.Pool`
+    in which case a new DBAPI connection is produced when the
+    :class:`_pool.Pool`
     next uses this record.
 
     The :class:`._ConnectionRecord` is delivered along with connection
-    pool events, including :meth:`.PoolEvents.connect` and
-    :meth:`.PoolEvents.checkout`, however :class:`._ConnectionRecord` still
+    pool events, including :meth:`_events.PoolEvents.connect` and
+    :meth:`_events.PoolEvents.checkout`, however :class:`._ConnectionRecord`
+    still
     remains an internal object whose API and internals may change.
 
     .. seealso::
@@ -359,6 +362,8 @@ class _ConnectionRecord(object):
         if connect:
             self.__connect(first_connect_check=True)
         self.finalize_callback = deque()
+
+    fresh = False
 
     fairy_ref = None
 
@@ -380,7 +385,7 @@ class _ConnectionRecord(object):
         """The ``.info`` dictionary associated with the DBAPI connection.
 
         This dictionary is shared among the :attr:`._ConnectionFairy.info`
-        and :attr:`.Connection.info` accessors.
+        and :attr:`_engine.Connection.info` accessors.
 
         .. note::
 
@@ -417,27 +422,37 @@ class _ConnectionRecord(object):
             dbapi_connection = rec.get_connection()
         except Exception as err:
             with util.safe_reraise():
-                rec._checkin_failed(err)
+                rec._checkin_failed(err, _fairy_was_created=False)
         echo = pool._should_log_debug()
         fairy = _ConnectionFairy(dbapi_connection, rec, echo)
-        rec.fairy_ref = weakref.ref(
+
+        rec.fairy_ref = ref = weakref.ref(
             fairy,
             lambda ref: _finalize_fairy
             and _finalize_fairy(None, rec, pool, ref, echo),
         )
-        _refs.add(rec)
+        _strong_ref_connection_records[ref] = rec
         if echo:
             pool.logger.debug(
                 "Connection %r checked out from pool", dbapi_connection
             )
         return fairy
 
-    def _checkin_failed(self, err):
+    def _checkin_failed(self, err, _fairy_was_created=True):
         self.invalidate(e=err)
-        self.checkin(_no_fairy_ref=True)
+        self.checkin(
+            _fairy_was_created=_fairy_was_created,
+        )
 
-    def checkin(self, _no_fairy_ref=False):
-        if self.fairy_ref is None and not _no_fairy_ref:
+    def checkin(self, _fairy_was_created=True):
+        if self.fairy_ref is None and _fairy_was_created:
+            # _fairy_was_created is False for the initial get connection phase;
+            # meaning there was no _ConnectionFairy and we must unconditionally
+            # do a checkin.
+            #
+            # otherwise, if fairy_was_created==True, if fairy_ref is None here
+            # that means we were checked in already, so this looks like
+            # a double checkin.
             util.warn("Double checkin attempted on %s" % self)
             return
         self.fairy_ref = None
@@ -448,6 +463,7 @@ class _ConnectionRecord(object):
             finalizer(connection)
         if pool.dispatch.checkin:
             pool.dispatch.checkin(connection, self)
+
         pool._return_conn(self)
 
     @property
@@ -467,7 +483,8 @@ class _ConnectionRecord(object):
 
         This method is called for all connection invalidations, including
         when the :meth:`._ConnectionFairy.invalidate` or
-        :meth:`.Connection.invalidate` methods are called, as well as when any
+        :meth:`_engine.Connection.invalidate` methods are called,
+        as well as when any
         so-called "automatic invalidation" condition occurs.
 
         :param e: an exception object indicating a reason for the invalidation.
@@ -503,6 +520,7 @@ class _ConnectionRecord(object):
                 "Soft " if soft else "",
                 self.connection,
             )
+
         if soft:
             self._soft_invalidate_time = time.time()
         else:
@@ -575,9 +593,10 @@ class _ConnectionRecord(object):
             connection = pool._invoke_creator(self)
             pool.logger.debug("Created new connection %r", connection)
             self.connection = connection
+            self.fresh = True
         except Exception as e:
-            pool.logger.debug("Error on connect(): %s", e)
-            raise
+            with util.safe_reraise():
+                pool.logger.debug("Error on connect(): %s", e)
         else:
             if first_connect_check:
                 pool.dispatch.first_connect.for_modify(
@@ -588,19 +607,42 @@ class _ConnectionRecord(object):
 
 
 def _finalize_fairy(
-    connection, connection_record, pool, ref, echo, fairy=None
+    connection,
+    connection_record,
+    pool,
+    ref,  # this is None when called directly, not by the gc
+    echo,
+    fairy=None,
 ):
     """Cleanup for a :class:`._ConnectionFairy` whether or not it's already
     been garbage collected.
 
+    When using an async dialect no IO can happen here (without using
+    a dedicated thread), since this is called outside the greenlet
+    context and with an already running loop. In this case function
+    will only log a message and raise a warning.
     """
-    _refs.discard(connection_record)
+
+    if ref:
+        _strong_ref_connection_records.pop(ref, None)
+    elif fairy:
+        _strong_ref_connection_records.pop(weakref.ref(fairy), None)
 
     if ref is not None:
         if connection_record.fairy_ref is not ref:
             return
         assert connection is None
         connection = connection_record.connection
+
+    # null pool is not _is_asyncio but can be used also with async dialects
+    dont_restore_gced = pool._dialect.is_async
+
+    if dont_restore_gced:
+        detach = not connection_record or ref
+        can_manipulate_connection = not ref
+    else:
+        detach = not connection_record
+        can_manipulate_connection = True
 
     if connection is not None:
         if connection_record and echo:
@@ -613,13 +655,32 @@ def _finalize_fairy(
                 connection, connection_record, echo
             )
             assert fairy.connection is connection
-            fairy._reset(pool)
+            if can_manipulate_connection:
+                fairy._reset(pool)
 
-            # Immediately close detached instances
-            if not connection_record:
-                if pool.dispatch.close_detached:
-                    pool.dispatch.close_detached(connection)
-                pool._close_connection(connection)
+            if detach:
+                if connection_record:
+                    fairy._pool = pool
+                    fairy.detach()
+
+                if can_manipulate_connection:
+                    if pool.dispatch.close_detached:
+                        pool.dispatch.close_detached(connection)
+
+                    pool._close_connection(connection)
+                else:
+                    message = (
+                        "The garbage collector is trying to clean up "
+                        "connection %r. This feature is unsupported on async "
+                        "dbapi, since no IO can be performed at this stage to "
+                        "reset the connection. Please close out all "
+                        "connections when they are no longer used, calling "
+                        "``close()`` or using a context manager to "
+                        "manage their lifetime."
+                    ) % connection
+                    pool.logger.error(message)
+                    util.warn(message)
+
         except BaseException as e:
             pool.logger.error(
                 "Exception during reset or similar", exc_info=True
@@ -633,7 +694,11 @@ def _finalize_fairy(
         connection_record.checkin()
 
 
-_refs = set()
+# a dictionary of the _ConnectionFairy weakrefs to _ConnectionRecord, so that
+# GC under pypy will call ConnectionFairy finalizers.  linked directly to the
+# weakref that will empty itself when collected so that it should not create
+# any unmanaged memory references.
+_strong_ref_connection_records = {}
 
 
 class _ConnectionFairy(object):
@@ -641,9 +706,9 @@ class _ConnectionFairy(object):
     """Proxies a DBAPI connection and provides return-on-dereference
     support.
 
-    This is an internal object used by the :class:`.Pool` implementation
+    This is an internal object used by the :class:`_pool.Pool` implementation
     to provide context management to a DBAPI connection delivered by
-    that :class:`.Pool`.
+    that :class:`_pool.Pool`.
 
     The name "fairy" is inspired by the fact that the
     :class:`._ConnectionFairy` object's lifespan is transitory, as it lasts
@@ -679,10 +744,11 @@ class _ConnectionFairy(object):
     rather than directly against the dialect-level do_rollback() and
     do_commit() methods.
 
-    In practice, a :class:`.Connection` assigns a :class:`.Transaction` object
+    In practice, a :class:`_engine.Connection` assigns a :class:`.Transaction`
+    object
     to this variable when one is in scope so that the :class:`.Transaction`
     takes the job of committing or rolling back on return if
-    :meth:`.Connection.close` is called while the :class:`.Transaction`
+    :meth:`_engine.Connection.close` is called while the :class:`.Transaction`
     still exists.
 
     This is essentially an "event handler" of sorts but is simplified as an
@@ -704,7 +770,6 @@ class _ConnectionFairy(object):
         if fairy.connection is None:
             raise exc.InvalidRequestError("This connection is closed")
         fairy._counter += 1
-
         if (
             not pool.dispatch.checkout and not pool._pre_ping
         ) or fairy._counter != 1:
@@ -717,22 +782,30 @@ class _ConnectionFairy(object):
         # here.
         attempts = 2
         while attempts > 0:
+            connection_is_fresh = fairy._connection_record.fresh
+            fairy._connection_record.fresh = False
             try:
                 if pool._pre_ping:
-                    if fairy._echo:
-                        pool.logger.debug(
-                            "Pool pre-ping on connection %s", fairy.connection
-                        )
-
-                    result = pool._dialect.do_ping(fairy.connection)
-                    if not result:
+                    if not connection_is_fresh:
                         if fairy._echo:
                             pool.logger.debug(
-                                "Pool pre-ping on connection %s failed, "
-                                "will invalidate pool",
+                                "Pool pre-ping on connection %s",
                                 fairy.connection,
                             )
-                        raise exc.InvalidatePoolError()
+                        result = pool._dialect.do_ping(fairy.connection)
+                        if not result:
+                            if fairy._echo:
+                                pool.logger.debug(
+                                    "Pool pre-ping on connection %s failed, "
+                                    "will invalidate pool",
+                                    fairy.connection,
+                                )
+                            raise exc.InvalidatePoolError()
+                    elif fairy._echo:
+                        pool.logger.debug(
+                            "Connection %s is fresh, skipping pre-ping",
+                            fairy.connection,
+                        )
 
                 pool.dispatch.checkout(
                     fairy.connection, fairy._connection_record, fairy
@@ -762,7 +835,17 @@ class _ConnectionFairy(object):
                     )
                 except Exception as err:
                     with util.safe_reraise():
-                        fairy._connection_record._checkin_failed(err)
+                        fairy._connection_record._checkin_failed(
+                            err,
+                            _fairy_was_created=True,
+                        )
+
+                        # prevent _ConnectionFairy from being carried
+                        # in the stack trace.  Do this after the
+                        # connection record has been checked in, so that
+                        # if the del triggers a finalize fairy, it won't
+                        # try to checkin a second time.
+                        del fairy
 
                 attempts -= 1
 
@@ -798,7 +881,15 @@ class _ConnectionFairy(object):
                     ", via agent" if self._reset_agent else "",
                 )
             if self._reset_agent:
-                self._reset_agent.rollback()
+                if not self._reset_agent.is_active:
+                    util.warn(
+                        "Reset agent is not active.  "
+                        "This should not occur unless there was already "
+                        "a connectivity error in progress."
+                    )
+                    pool._dialect.do_rollback(self)
+                else:
+                    self._reset_agent.rollback()
             else:
                 pool._dialect.do_rollback(self)
         elif pool._reset_on_return is reset_commit:
@@ -809,7 +900,15 @@ class _ConnectionFairy(object):
                     ", via agent" if self._reset_agent else "",
                 )
             if self._reset_agent:
-                self._reset_agent.commit()
+                if not self._reset_agent.is_active:
+                    util.warn(
+                        "Reset agent is not active.  "
+                        "This should not occur unless there was already "
+                        "a connectivity error in progress."
+                    )
+                    pool._dialect.do_commit(self)
+                else:
+                    self._reset_agent.commit()
             else:
                 pool._dialect.do_commit(self)
 
@@ -833,7 +932,8 @@ class _ConnectionFairy(object):
         The data here will follow along with the DBAPI connection including
         after it is returned to the connection pool and used again
         in subsequent instances of :class:`._ConnectionFairy`.  It is shared
-        with the :attr:`._ConnectionRecord.info` and :attr:`.Connection.info`
+        with the :attr:`._ConnectionRecord.info` and
+        :attr:`_engine.Connection.info`
         accessors.
 
         The dictionary associated with a particular DBAPI connection is
@@ -864,7 +964,7 @@ class _ConnectionFairy(object):
         """Mark this connection as invalidated.
 
         This method can be called directly, and is also called as a result
-        of the :meth:`.Connection.invalidate` method.   When invoked,
+        of the :meth:`_engine.Connection.invalidate` method.   When invoked,
         the DBAPI connection is immediately closed and discarded from
         further use by the pool.  The invalidation mechanism proceeds
         via the :meth:`._ConnectionRecord.invalidate` internal method.
@@ -918,7 +1018,6 @@ class _ConnectionFairy(object):
 
         if self._connection_record is not None:
             rec = self._connection_record
-            _refs.remove(rec)
             rec.fairy_ref = None
             rec.connection = None
             # TODO: should this be _return_conn?

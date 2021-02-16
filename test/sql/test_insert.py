@@ -13,6 +13,7 @@ from sqlalchemy import Sequence
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import table
+from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy.dialects import mysql
 from sqlalchemy.dialects import postgresql
@@ -130,12 +131,19 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column(
                 "col2",
                 Integer,
-                default=select([func.coalesce(func.max(foo.c.id))]),
+                default=select(func.coalesce(func.max(foo.c.id))),
             ),
         )
 
         self.assert_compile(
-            t.insert(inline=True, values={}),
+            t.insert().values({}),
+            "INSERT INTO test (col1, col2) VALUES (foo(:foo_1), "
+            "(SELECT coalesce(max(foo.id)) AS coalesce_1 FROM "
+            "foo))",
+        )
+
+        self.assert_compile(
+            t.insert().inline().values({}),
             "INSERT INTO test (col1, col2) VALUES (foo(:foo_1), "
             "(SELECT coalesce(max(foo.id)) AS coalesce_1 FROM "
             "foo))",
@@ -156,7 +164,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         checkparams = {"myid": 3, "name": "jack"}
 
         self.assert_compile(
-            insert(table1, dict(myid=3, name="jack")),
+            insert(table1).values(myid=3, name="jack"),
             "INSERT INTO mytable (myid, name) VALUES (:myid, :name)",
             checkparams=checkparams,
         )
@@ -186,7 +194,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
         checkparams = {"myid": 3, "name": "jack", "unknowncol": "oops"}
 
-        stmt = insert(table1, values=checkparams)
+        stmt = insert(table1).values(checkparams)
         assert_raises_message(
             exc.CompileError,
             "Unconsumed column names: unknowncol",
@@ -202,7 +210,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             {"myid": 4, "name": "someone", "unknowncol": "oops"},
         ]
 
-        stmt = insert(table1, values=checkparams)
+        stmt = insert(table1).values(checkparams)
         assert_raises_message(
             exc.CompileError,
             "Unconsumed column names: unknowncol",
@@ -220,7 +228,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         }
 
         self.assert_compile(
-            insert(table1, (3, "jack", "mydescription")),
+            insert(table1).values([3, "jack", "mydescription"]),
             "INSERT INTO mytable (myid, name, description) "
             "VALUES (:myid, :name, :description)",
             checkparams=checkparams,
@@ -230,7 +238,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            insert(table1, values=dict(myid=func.lala())),
+            insert(table1).values(myid=func.lala()),
             "INSERT INTO mytable (myid) VALUES (lala())",
         )
 
@@ -243,18 +251,18 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         }
 
         self.assert_compile(
-            insert(table1, values),
+            insert(table1).values(values),
             "INSERT INTO mytable (myid, name) VALUES (:userid, :username)",
         )
 
-    def test_insert_values(self):
+    def test_insert_values_multiple(self):
         table1 = self.tables.mytable
 
         values1 = {table1.c.myid: bindparam("userid")}
         values2 = {table1.c.name: bindparam("username")}
 
         self.assert_compile(
-            insert(table1, values=values1).values(values2),
+            insert(table1).values(values1).values(values2),
             "INSERT INTO mytable (myid, name) VALUES (:userid, :username)",
         )
 
@@ -290,12 +298,23 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         )
 
         self.assert_compile(
-            table.insert(values={}, inline=True),
+            table.insert().values(),
             "INSERT INTO sometable (foo) VALUES (foobar())",
         )
 
         self.assert_compile(
-            table.insert(inline=True),
+            table.insert(),
+            "INSERT INTO sometable (foo) VALUES (foobar())",
+            params={},
+        )
+
+        self.assert_compile(
+            table.insert().values().inline(),
+            "INSERT INTO sometable (foo) VALUES (foobar())",
+        )
+
+        self.assert_compile(
+            table.insert().inline(),
             "INSERT INTO sometable (foo) VALUES (foobar())",
             params={},
         )
@@ -313,7 +332,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
     def test_insert_from_select_returning(self):
         table1 = self.tables.mytable
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == "foo"
         )
         ins = (
@@ -332,7 +351,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
     def test_insert_from_select_select(self):
         table1 = self.tables.mytable
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == "foo"
         )
         ins = self.tables.myothertable.insert().from_select(
@@ -356,7 +375,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("data", String),
         )
 
-        stmt = t1.insert().from_select(("data",), select([t1.c.data]))
+        stmt = t1.insert().from_select(("data",), select(t1.c.data))
 
         self.assert_compile(
             stmt,
@@ -368,9 +387,9 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_insert_from_select_cte_one(self):
         table1 = self.tables.mytable
 
-        cte = select([table1.c.name]).where(table1.c.name == "bar").cte()
+        cte = select(table1.c.name).where(table1.c.name == "bar").cte()
 
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == cte.c.name
         )
 
@@ -394,9 +413,9 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
         table1 = self.tables.mytable
 
-        cte = select([table1.c.name]).where(table1.c.name == "bar").cte()
+        cte = select(table1.c.name).where(table1.c.name == "bar").cte()
 
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == cte.c.name
         )
 
@@ -450,7 +469,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
     def test_insert_from_select_select_alt_ordering(self):
         table1 = self.tables.mytable
-        sel = select([table1.c.name, table1.c.myid]).where(
+        sel = select(table1.c.name, table1.c.myid).where(
             table1.c.name == "foo"
         )
         ins = self.tables.myothertable.insert().from_select(
@@ -473,7 +492,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("foo", Integer, default=func.foobar()),
         )
         table1 = self.tables.mytable
-        sel = select([table1.c.myid]).where(table1.c.name == "foo")
+        sel = select(table1.c.myid).where(table1.c.name == "foo")
         ins = table.insert().from_select(["id"], sel, include_defaults=False)
         self.assert_compile(
             ins,
@@ -491,7 +510,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("foo", Integer, default=func.foobar()),
         )
         table1 = self.tables.mytable
-        sel = select([table1.c.myid]).where(table1.c.name == "foo")
+        sel = select(table1.c.myid).where(table1.c.name == "foo")
         ins = table.insert().from_select(["id"], sel)
         self.assert_compile(
             ins,
@@ -510,7 +529,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("foo", Integer, default=12),
         )
         table1 = self.tables.mytable
-        sel = select([table1.c.myid]).where(table1.c.name == "foo")
+        sel = select(table1.c.myid).where(table1.c.name == "foo")
         ins = table.insert().from_select(["id"], sel)
         self.assert_compile(
             ins,
@@ -530,7 +549,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("foo", Integer, default=12),
         )
         table1 = self.tables.mytable
-        sel = select([table1.c.myid, table1.c.myid.label("q")]).where(
+        sel = select(table1.c.myid, table1.c.myid.label("q")).where(
             table1.c.name == "foo"
         )
         ins = table.insert().from_select(["id", "foo"], sel)
@@ -555,7 +574,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("foo", Integer, default=foo),
         )
         table1 = self.tables.mytable
-        sel = select([table1.c.myid]).where(table1.c.name == "foo")
+        sel = select(table1.c.myid).where(table1.c.name == "foo")
         ins = table.insert().from_select(["id"], sel)
         self.assert_compile(
             ins,
@@ -576,7 +595,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("bar", String, default="baz"),
         )
 
-        stmt = select([table_.c.foo])
+        stmt = select(table_.c.foo)
         insert = table_.insert().from_select(["foo"], stmt)
 
         self.assert_compile(stmt, "SELECT mytable.foo FROM mytable")
@@ -594,7 +613,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
     def test_insert_mix_select_values_exception(self):
         table1 = self.tables.mytable
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == "foo"
         )
         ins = self.tables.myothertable.insert().from_select(
@@ -609,7 +628,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
     def test_insert_mix_values_select_exception(self):
         table1 = self.tables.mytable
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == "foo"
         )
         ins = self.tables.myothertable.insert().values(othername="5")
@@ -640,8 +659,8 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
         name = column("name")
         description = column("desc")
-        sel = select([name, mytable.c.description]).union(
-            select([name, description])
+        sel = select(name, mytable.c.description).union(
+            select(name, description)
         )
         ins = mytable.insert().from_select(
             [mytable.c.name, mytable.c.description], sel
@@ -656,7 +675,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_insert_from_select_col_values(self):
         table1 = self.tables.mytable
         table2 = self.tables.myothertable
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == "foo"
         )
         ins = table2.insert().from_select(
@@ -801,7 +820,10 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "Column 't.id' is marked as a member.*" "may not store NULL.$"
         ):
             self.assert_compile(
-                t.insert(), "INSERT INTO t () VALUES ()", params={}
+                t.insert(),
+                "INSERT INTO t () VALUES ()",
+                params={},
+                supports_default_values=False,
             )
 
 
@@ -812,7 +834,7 @@ class InsertImplicitReturningTest(
 
     def test_insert_select(self):
         table1 = self.tables.mytable
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == "foo"
         )
         ins = self.tables.myothertable.insert().from_select(
@@ -828,7 +850,7 @@ class InsertImplicitReturningTest(
 
     def test_insert_select_return_defaults(self):
         table1 = self.tables.mytable
-        sel = select([table1.c.myid, table1.c.name]).where(
+        sel = select(table1.c.myid, table1.c.name).where(
             table1.c.name == "foo"
         )
         ins = (
@@ -909,17 +931,34 @@ class EmptyTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         stmt = table1.insert().values({})  # hide from 2to3
-        self.assert_compile(stmt, "INSERT INTO mytable () VALUES ()")
+        self.assert_compile(
+            stmt,
+            "INSERT INTO mytable () VALUES ()",
+            supports_default_values=False,
+        )
 
     def test_supports_empty_insert_true(self):
+        table1 = self.tables.mytable
+
+        stmt = table1.insert().values({})
+        self.assert_compile(
+            stmt,
+            "INSERT INTO mytable DEFAULT VALUES",
+            supports_default_values=True,
+        )
+
+    def test_supports_empty_insert_true_executemany_mode(self):
         table1 = self.tables.mytable
 
         dialect = default.DefaultDialect()
         dialect.supports_empty_insert = dialect.supports_default_values = True
 
-        stmt = table1.insert().values({})  # hide from 2to3
+        stmt = table1.insert().values({})
         self.assert_compile(
-            stmt, "INSERT INTO mytable DEFAULT VALUES", dialect=dialect
+            stmt,
+            "INSERT INTO mytable (myid) VALUES (DEFAULT)",
+            dialect=dialect,
+            for_executemany=True,
         )
 
     def test_supports_empty_insert_false(self):
@@ -937,13 +976,17 @@ class EmptyTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             dialect=dialect,
         )
 
-    def _test_insert_with_empty_collection_values(self, collection):
+    @testing.combinations(([],), ({},), ((),))
+    def test_insert_with_empty_collection_values(self, collection):
         table1 = self.tables.mytable
 
         ins = table1.insert().values(collection)
 
         self.assert_compile(
-            ins, "INSERT INTO mytable () VALUES ()", checkparams={}
+            ins,
+            "INSERT INTO mytable () VALUES ()",
+            checkparams={},
+            supports_default_values=False,
         )
 
         # empty dict populates on next values call
@@ -952,15 +995,6 @@ class EmptyTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "INSERT INTO mytable (myid) VALUES (:myid)",
             checkparams={"myid": 3},
         )
-
-    def test_insert_with_empty_list_values(self):
-        self._test_insert_with_empty_collection_values([])
-
-    def test_insert_with_empty_dict_values(self):
-        self._test_insert_with_empty_collection_values({})
-
-    def test_insert_with_empty_tuple_values(self):
-        self._test_insert_with_empty_collection_values(())
 
 
 class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
@@ -1097,6 +1131,62 @@ class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
                 crud._multiparam_column(table1.c.z, 1),
             ],
             dialect=dialect,
+        )
+
+    def test_mix_single_and_multi_single_first(self):
+        table1 = self.tables.mytable
+
+        stmt = table1.insert().values(myid=1, name="d1")
+        stmt = stmt.values(
+            [{"myid": 2, "name": "d2"}, {"myid": 3, "name": "d3"}]
+        )
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "Can't mix single and multiple VALUES formats in one "
+            "INSERT statement",
+            stmt.compile,
+        )
+
+    def test_mix_single_and_multi_multi_first(self):
+        table1 = self.tables.mytable
+
+        stmt = table1.insert().values(
+            [{"myid": 2, "name": "d2"}, {"myid": 3, "name": "d3"}]
+        )
+
+        stmt = stmt.values(myid=1, name="d1")
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "Can't mix single and multiple VALUES formats in one "
+            "INSERT statement",
+            stmt.compile,
+        )
+
+    def test_multi_multi(self):
+        table1 = self.tables.mytable
+
+        stmt = table1.insert().values([{"myid": 1, "name": "d1"}])
+
+        stmt = stmt.values(
+            [{"myid": 2, "name": "d2"}, {"myid": 3, "name": "d3"}]
+        )
+
+        self.assert_compile(
+            stmt,
+            "INSERT INTO mytable (myid, name) VALUES (%(myid_m0)s, "
+            "%(name_m0)s), (%(myid_m1)s, %(name_m1)s), (%(myid_m2)s, "
+            "%(name_m2)s)",
+            checkparams={
+                "myid_m0": 1,
+                "name_m0": "d1",
+                "myid_m1": 2,
+                "name_m1": "d2",
+                "myid_m2": 3,
+                "name_m2": "d3",
+            },
+            dialect=postgresql.dialect(),
         )
 
     def test_inline_default(self):

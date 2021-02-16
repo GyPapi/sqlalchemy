@@ -9,37 +9,47 @@ import sys
 
 from setuptools import Distribution as _Distribution
 from setuptools import Extension
-from setuptools import find_packages
 from setuptools import setup
 from setuptools.command.test import test as TestCommand
 
 
 cmdclass = {}
-if sys.version_info < (2, 7):
-    raise Exception("SQLAlchemy requires Python 2.7 or higher.")
 
 cpython = platform.python_implementation() == "CPython"
+
+ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError)
+if sys.platform == "win32":
+    # Work around issue https://github.com/pypa/setuptools/issues/1902
+    ext_errors += (IOError, TypeError)
+    extra_compile_args = []
+elif sys.platform in ("linux", "linux2"):
+    # warn for undefined symbols in .c files
+    extra_compile_args = ["-Wundef", "-Werror=implicit-function-declaration"]
+else:
+    extra_compile_args = []
 
 ext_modules = [
     Extension(
         "sqlalchemy.cprocessors",
         sources=["lib/sqlalchemy/cextension/processors.c"],
+        extra_compile_args=extra_compile_args,
     ),
     Extension(
         "sqlalchemy.cresultproxy",
         sources=["lib/sqlalchemy/cextension/resultproxy.c"],
+        extra_compile_args=extra_compile_args,
     ),
     Extension(
-        "sqlalchemy.cutils", sources=["lib/sqlalchemy/cextension/utils.c"]
+        "sqlalchemy.cimmutabledict",
+        sources=["lib/sqlalchemy/cextension/immutabledict.c"],
+        extra_compile_args=extra_compile_args,
+    ),
+    Extension(
+        "sqlalchemy.cutils",
+        sources=["lib/sqlalchemy/cextension/utils.c"],
+        extra_compile_args=extra_compile_args,
     ),
 ]
-
-ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError)
-if sys.platform == "win32":
-    # 2.6's distutils.msvc9compiler can raise an IOError when failing to
-    # find the compiler
-    # for TypeError, see https://github.com/pypa/setuptools/issues/1902
-    ext_errors += (IOError, TypeError)
 
 
 class BuildFailed(Exception):
@@ -116,9 +126,6 @@ with open(
         .group(1)
     )
 
-with open(os.path.join(os.path.dirname(__file__), "README.rst")) as r_file:
-    readme = r_file.read()
-
 
 def run_setup(with_cext):
     kwargs = {}
@@ -133,57 +140,7 @@ def run_setup(with_cext):
 
         kwargs["ext_modules"] = []
 
-    setup(
-        name="SQLAlchemy",
-        version=VERSION,
-        description="Database Abstraction Library",
-        author="Mike Bayer",
-        author_email="mike_mp@zzzcomputing.com",
-        url="http://www.sqlalchemy.org",
-        project_urls={
-            "Documentation": "https://docs.sqlalchemy.org",
-            "Issue Tracker": "https://github.com/sqlalchemy/sqlalchemy/",
-        },
-        packages=find_packages("lib"),
-        package_dir={"": "lib"},
-        license="MIT",
-        cmdclass=cmdclass,
-        long_description=readme,
-        python_requires=">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*",
-        classifiers=[
-            "Development Status :: 5 - Production/Stable",
-            "Intended Audience :: Developers",
-            "License :: OSI Approved :: MIT License",
-            "Programming Language :: Python",
-            "Programming Language :: Python :: 2",
-            "Programming Language :: Python :: 2.7",
-            "Programming Language :: Python :: 3",
-            "Programming Language :: Python :: 3.4",
-            "Programming Language :: Python :: 3.5",
-            "Programming Language :: Python :: 3.6",
-            "Programming Language :: Python :: 3.7",
-            "Programming Language :: Python :: 3.8",
-            "Programming Language :: Python :: 3.9",
-            "Programming Language :: Python :: Implementation :: CPython",
-            "Programming Language :: Python :: Implementation :: PyPy",
-            "Topic :: Database :: Front-Ends",
-            "Operating System :: OS Independent",
-        ],
-        distclass=Distribution,
-        extras_require={
-            "mysql": ["mysqlclient"],
-            "pymysql": ["pymysql"],
-            "postgresql": ["psycopg2"],
-            "postgresql_psycopg2binary": ["psycopg2-binary"],
-            "postgresql_pg8000": ["pg8000"],
-            "postgresql_psycopg2cffi": ["psycopg2cffi"],
-            "oracle": ["cx_oracle"],
-            "mssql_pyodbc": ["pyodbc"],
-            "mssql_pymssql": ["pymssql"],
-            "mssql": ["pyodbc"],
-        },
-        **kwargs
-    )
+    setup(version=VERSION, cmdclass=cmdclass, distclass=Distribution, **kwargs)
 
 
 if not cpython:

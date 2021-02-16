@@ -1,5 +1,5 @@
 # orm/dependency.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -43,6 +43,7 @@ class DependencyProcessor(object):
         else:
             self._passive_update_flag = attributes.PASSIVE_OFF
 
+        self.sort_key = "%s_%s" % (self.parent._sort_key, prop.key)
         self.key = prop.key
         if not self.prop.synchronize_pairs:
             raise sa_exc.ArgumentError(
@@ -1184,7 +1185,7 @@ class ManyToManyDP(DependencyProcessor):
 
         if secondary_delete:
             associationrow = secondary_delete[0]
-            statement = self.secondary.delete(
+            statement = self.secondary.delete().where(
                 sql.and_(
                     *[
                         c == sql.bindparam(c.key, type_=c.type)

@@ -1,6 +1,6 @@
 # coding: utf-8
-import contextlib
 import datetime
+import itertools
 import logging
 import logging.handlers
 
@@ -9,7 +9,6 @@ from sqlalchemy import bindparam
 from sqlalchemy import cast
 from sqlalchemy import Column
 from sqlalchemy import DateTime
-from sqlalchemy import dialects
 from sqlalchemy import event
 from sqlalchemy import exc
 from sqlalchemy import extract
@@ -28,17 +27,22 @@ from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import TypeDecorator
+from sqlalchemy import util
 from sqlalchemy.dialects.postgresql import base as postgresql
 from sqlalchemy.dialects.postgresql import psycopg2 as psycopg2_dialect
 from sqlalchemy.dialects.postgresql.psycopg2 import EXECUTEMANY_BATCH
-from sqlalchemy.dialects.postgresql.psycopg2 import EXECUTEMANY_DEFAULT
+from sqlalchemy.dialects.postgresql.psycopg2 import EXECUTEMANY_PLAIN
 from sqlalchemy.dialects.postgresql.psycopg2 import EXECUTEMANY_VALUES
+from sqlalchemy.engine import cursor as _cursor
 from sqlalchemy.engine import engine_from_config
 from sqlalchemy.engine import url
+from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
+from sqlalchemy.testing import config
 from sqlalchemy.testing import engines
-from sqlalchemy.testing import expect_deprecated
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertions import assert_raises
 from sqlalchemy.testing.assertions import assert_raises_message
@@ -47,7 +51,14 @@ from sqlalchemy.testing.assertions import AssertsExecutionResults
 from sqlalchemy.testing.assertions import eq_
 from sqlalchemy.testing.assertions import eq_regex
 from sqlalchemy.testing.assertions import ne_
-from ...engine import test_execute
+from sqlalchemy.util import u
+from sqlalchemy.util import ue
+from ...engine import test_deprecations
+
+if True:
+    from sqlalchemy.dialects.postgresql.psycopg2 import (
+        EXECUTEMANY_VALUES_PLUS_BATCH,
+    )
 
 
 class DialectTest(fixtures.TestBase):
@@ -56,7 +67,7 @@ class DialectTest(fixtures.TestBase):
     def test_version_parsing(self):
         def mock_conn(res):
             return mock.Mock(
-                execute=mock.Mock(
+                exec_driver_sql=mock.Mock(
                     return_value=mock.Mock(scalar=mock.Mock(return_value=res))
                 )
             )
@@ -95,17 +106,35 @@ class DialectTest(fixtures.TestBase):
                 "(Red Hat 4.8.5-11), 64-bit",
                 (10,),
             ),
+            (
+                "PostgreSQL 8.0.2 on i686-pc-linux-gnu, compiled by GCC gcc "
+                "(GCC) 3.4.2 20041017 (Red Hat 3.4.2-6.fc3), "
+                "Redshift 1.0.12103",
+                (8, 0, 2),
+            ),
         ]:
             eq_(dialect._get_server_version_info(mock_conn(string)), version)
 
-    def test_deprecated_dialect_name_still_loads(self):
-        dialects.registry.clear()
-        with expect_deprecated(
-            "The 'postgres' dialect name " "has been renamed to 'postgresql'"
+    @testing.requires.python3
+    @testing.requires.psycopg2_compatibility
+    def test_pg_dialect_no_native_unicode_in_python3(self, testing_engine):
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            "psycopg2 native_unicode mode is required under Python 3",
         ):
-            dialect = url.URL("postgres").get_dialect()
-        is_(dialect, postgresql.dialect)
+            testing_engine(options=dict(use_native_unicode=False))
 
+    @testing.requires.python2
+    @testing.requires.psycopg2_compatibility
+    def test_pg_dialect_no_native_unicode_in_python2(self, testing_engine):
+        e = testing_engine(options=dict(use_native_unicode=False))
+        with e.connect() as conn:
+            eq_(
+                conn.exec_driver_sql(u"SELECT '🐍 voix m’a réveillé'").scalar(),
+                u"🐍 voix m’a réveillé".encode("utf-8"),
+            )
+
+    @testing.requires.python2
     @testing.requires.psycopg2_compatibility
     def test_pg_dialect_use_native_unicode_from_config(self):
         config = {
@@ -159,14 +188,48 @@ class DialectTest(fixtures.TestBase):
         eq_(cargs, [])
         eq_(cparams, {"host": "somehost", "any_random_thing": "yes"})
 
+    def test_psycopg2_nonempty_connection_string_w_query_two(self):
+        dialect = psycopg2_dialect.dialect()
+        url_string = "postgresql://USER:PASS@/DB?host=hostA"
+        u = url.make_url(url_string)
+        cargs, cparams = dialect.create_connect_args(u)
+        eq_(cargs, [])
+        eq_(cparams["host"], "hostA")
+
+    def test_psycopg2_nonempty_connection_string_w_query_three(self):
+        dialect = psycopg2_dialect.dialect()
+        url_string = (
+            "postgresql://USER:PASS@/DB"
+            "?host=hostA:portA&host=hostB&host=hostC"
+        )
+        u = url.make_url(url_string)
+        cargs, cparams = dialect.create_connect_args(u)
+        eq_(cargs, [])
+        eq_(cparams["host"], "hostA:portA,hostB,hostC")
+
 
 class ExecuteManyMode(object):
     __only_on__ = "postgresql+psycopg2"
     __backend__ = True
 
     run_create_tables = "each"
+    run_deletes = None
 
     options = None
+
+    @config.fixture()
+    def connection(self):
+        opts = dict(self.options)
+        opts["use_reaper"] = False
+        eng = engines.testing_engine(options=opts)
+
+        conn = eng.connect()
+        trans = conn.begin()
+        yield conn
+        if trans.is_active:
+            trans.rollback()
+        conn.close()
+        eng.dispose()
 
     @classmethod
     def define_tables(cls, metadata):
@@ -179,52 +242,53 @@ class ExecuteManyMode(object):
             Column("z", Integer, server_default="5"),
         )
 
-    @contextlib.contextmanager
-    def expect_deprecated_opts(self):
-        yield
+        Table(
+            u("Unitéble2"),
+            metadata,
+            Column(u("méil"), Integer, primary_key=True),
+            Column(ue("\u6e2c\u8a66"), Integer),
+        )
 
-    def setup(self):
-        super(ExecuteManyMode, self).setup()
-        with self.expect_deprecated_opts():
-            self.engine = engines.testing_engine(options=self.options)
-
-    def teardown(self):
-        self.engine.dispose()
-        super(ExecuteManyMode, self).teardown()
-
-    def test_insert(self):
+    def test_insert(self, connection):
         from psycopg2 import extras
 
-        if self.engine.dialect.executemany_mode is EXECUTEMANY_BATCH:
-            meth = extras.execute_batch
-            stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
-            expected_kwargs = {}
-        else:
+        values_page_size = connection.dialect.executemany_values_page_size
+        batch_page_size = connection.dialect.executemany_batch_page_size
+        if connection.dialect.executemany_mode & EXECUTEMANY_VALUES:
             meth = extras.execute_values
             stmt = "INSERT INTO data (x, y) VALUES %s"
-            expected_kwargs = {"template": "(%(x)s, %(y)s)"}
+            expected_kwargs = {
+                "template": "(%(x)s, %(y)s)",
+                "page_size": values_page_size,
+                "fetch": False,
+            }
+        elif connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
+            meth = extras.execute_batch
+            stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
+            expected_kwargs = {"page_size": batch_page_size}
+        else:
+            assert False
 
         with mock.patch.object(
             extras, meth.__name__, side_effect=meth
         ) as mock_exec:
-            with self.engine.connect() as conn:
-                conn.execute(
-                    self.tables.data.insert(),
-                    [
-                        {"x": "x1", "y": "y1"},
-                        {"x": "x2", "y": "y2"},
-                        {"x": "x3", "y": "y3"},
-                    ],
-                )
+            connection.execute(
+                self.tables.data.insert(),
+                [
+                    {"x": "x1", "y": "y1"},
+                    {"x": "x2", "y": "y2"},
+                    {"x": "x3", "y": "y3"},
+                ],
+            )
 
-                eq_(
-                    conn.execute(select([self.tables.data])).fetchall(),
-                    [
-                        (1, "x1", "y1", 5),
-                        (2, "x2", "y2", 5),
-                        (3, "x3", "y3", 5),
-                    ],
-                )
+            eq_(
+                connection.execute(select(self.tables.data)).fetchall(),
+                [
+                    (1, "x1", "y1", 5),
+                    (2, "x2", "y2", 5),
+                    (3, "x3", "y3", 5),
+                ],
+            )
         eq_(
             mock_exec.mock_calls,
             [
@@ -241,31 +305,38 @@ class ExecuteManyMode(object):
             ],
         )
 
-    def test_insert_no_page_size(self):
+    def test_insert_no_page_size(self, connection):
         from psycopg2 import extras
 
-        eng = self.engine
-        if eng.dialect.executemany_mode is EXECUTEMANY_BATCH:
-            meth = extras.execute_batch
-            stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
-            expected_kwargs = {}
-        else:
+        values_page_size = connection.dialect.executemany_values_page_size
+        batch_page_size = connection.dialect.executemany_batch_page_size
+
+        if connection.dialect.executemany_mode & EXECUTEMANY_VALUES:
             meth = extras.execute_values
             stmt = "INSERT INTO data (x, y) VALUES %s"
-            expected_kwargs = {"template": "(%(x)s, %(y)s)"}
+            expected_kwargs = {
+                "template": "(%(x)s, %(y)s)",
+                "page_size": values_page_size,
+                "fetch": False,
+            }
+        elif connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
+            meth = extras.execute_batch
+            stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
+            expected_kwargs = {"page_size": batch_page_size}
+        else:
+            assert False
 
         with mock.patch.object(
             extras, meth.__name__, side_effect=meth
         ) as mock_exec:
-            with eng.connect() as conn:
-                conn.execute(
-                    self.tables.data.insert(),
-                    [
-                        {"x": "x1", "y": "y1"},
-                        {"x": "x2", "y": "y2"},
-                        {"x": "x3", "y": "y3"},
-                    ],
-                )
+            connection.execute(
+                self.tables.data.insert(),
+                [
+                    {"x": "x1", "y": "y1"},
+                    {"x": "x2", "y": "y2"},
+                    {"x": "x3", "y": "y3"},
+                ],
+            )
 
         eq_(
             mock_exec.mock_calls,
@@ -290,22 +361,27 @@ class ExecuteManyMode(object):
         opts["executemany_batch_page_size"] = 500
         opts["executemany_values_page_size"] = 1000
 
-        with self.expect_deprecated_opts():
-            eng = engines.testing_engine(options=opts)
+        eng = engines.testing_engine(options=opts)
 
-        if eng.dialect.executemany_mode is EXECUTEMANY_BATCH:
+        if eng.dialect.executemany_mode & EXECUTEMANY_VALUES:
+            meth = extras.execute_values
+            stmt = "INSERT INTO data (x, y) VALUES %s"
+            expected_kwargs = {
+                "fetch": False,
+                "page_size": 1000,
+                "template": "(%(x)s, %(y)s)",
+            }
+        elif eng.dialect.executemany_mode & EXECUTEMANY_BATCH:
             meth = extras.execute_batch
             stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
             expected_kwargs = {"page_size": 500}
         else:
-            meth = extras.execute_values
-            stmt = "INSERT INTO data (x, y) VALUES %s"
-            expected_kwargs = {"page_size": 1000, "template": "(%(x)s, %(y)s)"}
+            assert False
 
         with mock.patch.object(
             extras, meth.__name__, side_effect=meth
         ) as mock_exec:
-            with eng.connect() as conn:
+            with eng.begin() as conn:
                 conn.execute(
                     self.tables.data.insert(),
                     [
@@ -331,79 +407,88 @@ class ExecuteManyMode(object):
             ],
         )
 
-    def test_update_fallback(self):
+    def test_insert_unicode_keys(self, connection):
+        table = self.tables[u("Unitéble2")]
+
+        stmt = table.insert()
+
+        connection.execute(
+            stmt,
+            [
+                {u("méil"): 1, ue("\u6e2c\u8a66"): 1},
+                {u("méil"): 2, ue("\u6e2c\u8a66"): 2},
+                {u("méil"): 3, ue("\u6e2c\u8a66"): 3},
+            ],
+        )
+
+        eq_(connection.execute(table.select()).all(), [(1, 1), (2, 2), (3, 3)])
+
+    def test_update_fallback(self, connection):
         from psycopg2 import extras
 
-        eng = self.engine
+        batch_page_size = connection.dialect.executemany_batch_page_size
         meth = extras.execute_batch
         stmt = "UPDATE data SET y=%(yval)s WHERE data.x = %(xval)s"
-        expected_kwargs = {}
+        expected_kwargs = {"page_size": batch_page_size}
 
         with mock.patch.object(
             extras, meth.__name__, side_effect=meth
         ) as mock_exec:
-            with eng.connect() as conn:
-                conn.execute(
-                    self.tables.data.update()
-                    .where(self.tables.data.c.x == bindparam("xval"))
-                    .values(y=bindparam("yval")),
-                    [
-                        {"xval": "x1", "yval": "y5"},
-                        {"xval": "x3", "yval": "y6"},
-                    ],
-                )
-
-        eq_(
-            mock_exec.mock_calls,
-            [
-                mock.call(
-                    mock.ANY,
-                    stmt,
-                    (
-                        {"xval": "x1", "yval": "y5"},
-                        {"xval": "x3", "yval": "y6"},
-                    ),
-                    **expected_kwargs
-                )
-            ],
-        )
-
-    def test_not_sane_rowcount(self):
-        self.engine.connect().close()
-        assert not self.engine.dialect.supports_sane_multi_rowcount
-
-    def test_update(self):
-        with self.engine.connect() as conn:
-            conn.execute(
-                self.tables.data.insert(),
-                [
-                    {"x": "x1", "y": "y1"},
-                    {"x": "x2", "y": "y2"},
-                    {"x": "x3", "y": "y3"},
-                ],
-            )
-
-            conn.execute(
+            connection.execute(
                 self.tables.data.update()
                 .where(self.tables.data.c.x == bindparam("xval"))
                 .values(y=bindparam("yval")),
-                [{"xval": "x1", "yval": "y5"}, {"xval": "x3", "yval": "y6"}],
+                [
+                    {"xval": "x1", "yval": "y5"},
+                    {"xval": "x3", "yval": "y6"},
+                ],
             )
+
+        if connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
             eq_(
-                conn.execute(
-                    select([self.tables.data]).order_by(self.tables.data.c.id)
-                ).fetchall(),
-                [(1, "x1", "y5", 5), (2, "x2", "y2", 5), (3, "x3", "y6", 5)],
+                mock_exec.mock_calls,
+                [
+                    mock.call(
+                        mock.ANY,
+                        stmt,
+                        (
+                            {"xval": "x1", "yval": "y5"},
+                            {"xval": "x3", "yval": "y6"},
+                        ),
+                        **expected_kwargs
+                    )
+                ],
             )
+        else:
+            eq_(mock_exec.mock_calls, [])
 
+    def test_not_sane_rowcount(self, connection):
+        if connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
+            assert not connection.dialect.supports_sane_multi_rowcount
+        else:
+            assert connection.dialect.supports_sane_multi_rowcount
 
-class UseBatchModeTest(ExecuteManyMode, fixtures.TablesTest):
-    options = {"use_batch_mode": True}
+    def test_update(self, connection):
+        connection.execute(
+            self.tables.data.insert(),
+            [
+                {"x": "x1", "y": "y1"},
+                {"x": "x2", "y": "y2"},
+                {"x": "x3", "y": "y3"},
+            ],
+        )
 
-    def expect_deprecated_opts(self):
-        return expect_deprecated(
-            "The psycopg2 use_batch_mode flag is superseded by "
-            "executemany_mode='batch'"
+        connection.execute(
+            self.tables.data.update()
+            .where(self.tables.data.c.x == bindparam("xval"))
+            .values(y=bindparam("yval")),
+            [{"xval": "x1", "yval": "y5"}, {"xval": "x3", "yval": "y6"}],
+        )
+        eq_(
+            connection.execute(
+                select(self.tables.data).order_by(self.tables.data.c.id)
+            ).fetchall(),
+            [(1, "x1", "y5", 5), (2, "x2", "y2", 5), (3, "x3", "y6", 5)],
         )
 
 
@@ -412,18 +497,123 @@ class ExecutemanyBatchModeTest(ExecuteManyMode, fixtures.TablesTest):
 
 
 class ExecutemanyValuesInsertsTest(ExecuteManyMode, fixtures.TablesTest):
-    options = {"executemany_mode": "values"}
+    options = {"executemany_mode": "values_only"}
 
-    def test_insert_w_newlines(self):
+    def test_insert_returning_values(self, connection):
+        """the psycopg2 dialect needs to assemble a fully buffered result
+        with the return value of execute_values().
+
+        """
+        t = self.tables.data
+
+        conn = connection
+        page_size = conn.dialect.executemany_values_page_size or 100
+        data = [
+            {"x": "x%d" % i, "y": "y%d" % i}
+            for i in range(1, page_size * 5 + 27)
+        ]
+        result = conn.execute(t.insert().returning(t.c.x, t.c.y), data)
+
+        eq_([tup[0] for tup in result.cursor.description], ["x", "y"])
+        eq_(result.keys(), ["x", "y"])
+        assert t.c.x in result.keys()
+        assert t.c.id not in result.keys()
+        assert not result._soft_closed
+        assert isinstance(
+            result.cursor_strategy,
+            _cursor.FullyBufferedCursorFetchStrategy,
+        )
+        assert not result.cursor.closed
+        assert not result.closed
+        eq_(result.mappings().all(), data)
+
+        assert result._soft_closed
+        # assert result.closed
+        assert result.cursor is None
+
+    def test_insert_returning_preexecute_pk(self, metadata, connection):
+        counter = itertools.count(1)
+
+        t = Table(
+            "t",
+            self.metadata,
+            Column(
+                "id",
+                Integer,
+                primary_key=True,
+                default=lambda: util.next(counter),
+            ),
+            Column("data", Integer),
+        )
+        metadata.create_all(connection)
+
+        result = connection.execute(
+            t.insert().return_defaults(),
+            [{"data": 1}, {"data": 2}, {"data": 3}],
+        )
+
+        eq_(result.inserted_primary_key_rows, [(1,), (2,), (3,)])
+
+    def test_insert_returning_defaults(self, connection):
+        t = self.tables.data
+
+        conn = connection
+
+        result = conn.execute(t.insert(), {"x": "x0", "y": "y0"})
+        first_pk = result.inserted_primary_key[0]
+
+        page_size = conn.dialect.executemany_values_page_size or 100
+        total_rows = page_size * 5 + 27
+        data = [{"x": "x%d" % i, "y": "y%d" % i} for i in range(1, total_rows)]
+        result = conn.execute(t.insert().returning(t.c.id, t.c.z), data)
+
+        eq_(
+            result.all(),
+            [(pk, 5) for pk in range(1 + first_pk, total_rows + first_pk)],
+        )
+
+    def test_insert_return_pks_default_values(self, connection):
+        """test sending multiple, empty rows into an INSERT and getting primary
+        key values back.
+
+        This has to use a format that indicates at least one DEFAULT in
+        multiple parameter sets, i.e. "INSERT INTO table (anycol) VALUES
+        (DEFAULT) (DEFAULT) (DEFAULT) ... RETURNING col"
+
+        """
+        t = self.tables.data
+
+        conn = connection
+
+        result = conn.execute(t.insert(), {"x": "x0", "y": "y0"})
+        first_pk = result.inserted_primary_key[0]
+
+        page_size = conn.dialect.executemany_values_page_size or 100
+        total_rows = page_size * 5 + 27
+        data = [{} for i in range(1, total_rows)]
+        result = conn.execute(t.insert().returning(t.c.id), data)
+
+        eq_(
+            result.all(),
+            [(pk,) for pk in range(1 + first_pk, total_rows + first_pk)],
+        )
+
+    def test_insert_w_newlines(self, connection):
         from psycopg2 import extras
 
         t = self.tables.data
 
-        ins = t.insert(inline=True).values(
-            id=bindparam("id"),
-            x=select([literal_column("5")]).select_from(self.tables.data),
-            y=bindparam("y"),
-            z=bindparam("z"),
+        ins = (
+            t.insert()
+            .inline()
+            .values(
+                id=bindparam("id"),
+                x=select(literal_column("5"))
+                .select_from(self.tables.data)
+                .scalar_subquery(),
+                y=bindparam("y"),
+                z=bindparam("z"),
+            )
         )
         # compiled SQL has a newline in it
         eq_(
@@ -436,15 +626,14 @@ class ExecutemanyValuesInsertsTest(ExecuteManyMode, fixtures.TablesTest):
             extras, "execute_values", side_effect=meth
         ) as mock_exec:
 
-            with self.engine.connect() as conn:
-                conn.execute(
-                    ins,
-                    [
-                        {"id": 1, "y": "y1", "z": 1},
-                        {"id": 2, "y": "y2", "z": 2},
-                        {"id": 3, "y": "y3", "z": 3},
-                    ],
-                )
+            connection.execute(
+                ins,
+                [
+                    {"id": 1, "y": "y1", "z": 1},
+                    {"id": 2, "y": "y2", "z": 2},
+                    {"id": 3, "y": "y3", "z": 3},
+                ],
+            )
 
         eq_(
             mock_exec.mock_calls,
@@ -458,20 +647,28 @@ class ExecutemanyValuesInsertsTest(ExecuteManyMode, fixtures.TablesTest):
                         {"id": 3, "y": "y3", "z": 3},
                     ),
                     template="(%(id)s, (SELECT 5 \nFROM data), %(y)s, %(z)s)",
+                    fetch=False,
+                    page_size=connection.dialect.executemany_values_page_size,
                 )
             ],
         )
 
-    def test_insert_modified_by_event(self):
+    def test_insert_modified_by_event(self, connection):
         from psycopg2 import extras
 
         t = self.tables.data
 
-        ins = t.insert(inline=True).values(
-            id=bindparam("id"),
-            x=select([literal_column("5")]).select_from(self.tables.data),
-            y=bindparam("y"),
-            z=bindparam("z"),
+        ins = (
+            t.insert()
+            .inline()
+            .values(
+                id=bindparam("id"),
+                x=select(literal_column("5"))
+                .select_from(self.tables.data)
+                .scalar_subquery(),
+                y=bindparam("y"),
+                z=bindparam("z"),
+            )
         )
         # compiled SQL has a newline in it
         eq_(
@@ -486,46 +683,56 @@ class ExecutemanyValuesInsertsTest(ExecuteManyMode, fixtures.TablesTest):
             extras, "execute_batch", side_effect=meth
         ) as mock_batch:
 
-            with self.engine.connect() as conn:
-
-                # create an event hook that will change the statement to
-                # something else, meaning the dialect has to detect that
-                # insert_single_values_expr is no longer useful
-                @event.listens_for(conn, "before_cursor_execute", retval=True)
-                def before_cursor_execute(
-                    conn, cursor, statement, parameters, context, executemany
-                ):
-                    statement = (
-                        "INSERT INTO data (id, y, z) VALUES "
-                        "(%(id)s, %(y)s, %(z)s)"
-                    )
-                    return statement, parameters
-
-                conn.execute(
-                    ins,
-                    [
-                        {"id": 1, "y": "y1", "z": 1},
-                        {"id": 2, "y": "y2", "z": 2},
-                        {"id": 3, "y": "y3", "z": 3},
-                    ],
+            # create an event hook that will change the statement to
+            # something else, meaning the dialect has to detect that
+            # insert_single_values_expr is no longer useful
+            @event.listens_for(
+                connection, "before_cursor_execute", retval=True
+            )
+            def before_cursor_execute(
+                conn, cursor, statement, parameters, context, executemany
+            ):
+                statement = (
+                    "INSERT INTO data (id, y, z) VALUES "
+                    "(%(id)s, %(y)s, %(z)s)"
                 )
+                return statement, parameters
+
+            connection.execute(
+                ins,
+                [
+                    {"id": 1, "y": "y1", "z": 1},
+                    {"id": 2, "y": "y2", "z": 2},
+                    {"id": 3, "y": "y3", "z": 3},
+                ],
+            )
 
         eq_(mock_values.mock_calls, [])
-        eq_(
-            mock_batch.mock_calls,
-            [
-                mock.call(
-                    mock.ANY,
-                    "INSERT INTO data (id, y, z) VALUES "
-                    "(%(id)s, %(y)s, %(z)s)",
-                    (
-                        {"id": 1, "y": "y1", "z": 1},
-                        {"id": 2, "y": "y2", "z": 2},
-                        {"id": 3, "y": "y3", "z": 3},
-                    ),
-                )
-            ],
-        )
+
+        if connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
+            eq_(
+                mock_batch.mock_calls,
+                [
+                    mock.call(
+                        mock.ANY,
+                        "INSERT INTO data (id, y, z) VALUES "
+                        "(%(id)s, %(y)s, %(z)s)",
+                        (
+                            {"id": 1, "y": "y1", "z": 1},
+                            {"id": 2, "y": "y2", "z": 2},
+                            {"id": 3, "y": "y3", "z": 3},
+                        ),
+                    )
+                ],
+            )
+        else:
+            eq_(mock_batch.mock_calls, [])
+
+
+class ExecutemanyValuesPlusBatchInsertsTest(
+    ExecuteManyMode, fixtures.TablesTest
+):
+    options = {"executemany_mode": "values_plus_batch"}
 
 
 class ExecutemanyFlagOptionsTest(fixtures.TablesTest):
@@ -534,14 +741,15 @@ class ExecutemanyFlagOptionsTest(fixtures.TablesTest):
 
     def test_executemany_correct_flag_options(self):
         for opt, expected in [
-            (None, EXECUTEMANY_DEFAULT),
+            (None, EXECUTEMANY_PLAIN),
             ("batch", EXECUTEMANY_BATCH),
-            ("values", EXECUTEMANY_VALUES),
+            ("values_only", EXECUTEMANY_VALUES),
+            ("values_plus_batch", EXECUTEMANY_VALUES_PLUS_BATCH),
         ]:
-            self.engine = engines.testing_engine(
+            connection = engines.testing_engine(
                 options={"executemany_mode": opt}
             )
-            is_(self.engine.dialect.executemany_mode, expected)
+            is_(connection.dialect.executemany_mode, expected)
 
     def test_executemany_wrong_flag_options(self):
         for opt in [1, True, "batch_insert"]:
@@ -569,9 +777,9 @@ class MiscBackendTest(
             Column("date1", DateTime(timezone=True)),
             Column("date2", DateTime(timezone=False)),
         )
-        metadata.create_all()
-        m2 = MetaData(testing.db)
-        t2 = Table("pgdate", m2, autoload=True)
+        metadata.create_all(testing.db)
+        m2 = MetaData()
+        t2 = Table("pgdate", m2, autoload_with=testing.db)
         assert t2.c.date1.type.timezone is True
         assert t2.c.date2.type.timezone is False
 
@@ -581,6 +789,195 @@ class MiscBackendTest(
         assert testing.db.dialect.dbapi.__version__.startswith(
             ".".join(str(x) for x in v)
         )
+
+    @testing.combinations(
+        ((8, 1), False, False),
+        ((8, 1), None, False),
+        ((11, 5), True, False),
+        ((11, 5), False, True),
+    )
+    def test_backslash_escapes_detection(
+        self, version, explicit_setting, expected
+    ):
+        engine = engines.testing_engine()
+
+        def _server_version(conn):
+            return version
+
+        if explicit_setting is not None:
+
+            @event.listens_for(engine, "connect", insert=True)
+            @event.listens_for(engine, "first_connect", insert=True)
+            def connect(dbapi_connection, connection_record):
+                cursor = dbapi_connection.cursor()
+                cursor.execute(
+                    "SET SESSION standard_conforming_strings = %s"
+                    % ("off" if not explicit_setting else "on")
+                )
+                dbapi_connection.commit()
+
+        with mock.patch.object(
+            engine.dialect, "_get_server_version_info", _server_version
+        ):
+            with engine.connect():
+                eq_(engine.dialect._backslash_escapes, expected)
+
+    def test_dbapi_autocommit_attribute(self):
+        """all the supported DBAPIs have an .autocommit attribute.  make
+        sure it works and preserves isolation level.
+
+        This is added in particular to support the asyncpg dialect that
+        has a DBAPI compatibility layer.
+
+        """
+
+        with testing.db.connect().execution_options(
+            isolation_level="SERIALIZABLE"
+        ) as conn:
+            dbapi_conn = conn.connection.connection
+
+            is_false(dbapi_conn.autocommit)
+
+            with conn.begin():
+
+                existing_isolation = conn.exec_driver_sql(
+                    "show transaction isolation level"
+                ).scalar()
+                eq_(existing_isolation.upper(), "SERIALIZABLE")
+
+                txid1 = conn.exec_driver_sql("select txid_current()").scalar()
+                txid2 = conn.exec_driver_sql("select txid_current()").scalar()
+                eq_(txid1, txid2)
+
+            dbapi_conn.autocommit = True
+
+            with conn.begin():
+                # magic way to see if we are in autocommit mode from
+                # the server's perspective
+                txid1 = conn.exec_driver_sql("select txid_current()").scalar()
+                txid2 = conn.exec_driver_sql("select txid_current()").scalar()
+                ne_(txid1, txid2)
+
+            dbapi_conn.autocommit = False
+
+            with conn.begin():
+
+                existing_isolation = conn.exec_driver_sql(
+                    "show transaction isolation level"
+                ).scalar()
+                eq_(existing_isolation.upper(), "SERIALIZABLE")
+
+                txid1 = conn.exec_driver_sql("select txid_current()").scalar()
+                txid2 = conn.exec_driver_sql("select txid_current()").scalar()
+                eq_(txid1, txid2)
+
+    def test_readonly_flag_connection(self):
+        with testing.db.connect() as conn:
+            # asyncpg requires serializable for readonly..
+            conn = conn.execution_options(
+                isolation_level="SERIALIZABLE", postgresql_readonly=True
+            )
+
+            dbapi_conn = conn.connection.connection
+
+            cursor = dbapi_conn.cursor()
+            cursor.execute("show transaction_read_only")
+            val = cursor.fetchone()[0]
+            cursor.close()
+            eq_(val, "on")
+            is_true(testing.db.dialect.get_readonly(dbapi_conn))
+
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("show transaction_read_only")
+            val = cursor.fetchone()[0]
+        finally:
+            cursor.close()
+            dbapi_conn.rollback()
+        eq_(val, "off")
+
+    def test_deferrable_flag_connection(self):
+        with testing.db.connect() as conn:
+            # asyncpg but not for deferrable?  which the PG docs actually
+            # state.  weird
+            conn = conn.execution_options(
+                isolation_level="SERIALIZABLE", postgresql_deferrable=True
+            )
+
+            dbapi_conn = conn.connection.connection
+
+            cursor = dbapi_conn.cursor()
+            cursor.execute("show transaction_deferrable")
+            val = cursor.fetchone()[0]
+            cursor.close()
+            eq_(val, "on")
+            is_true(testing.db.dialect.get_deferrable(dbapi_conn))
+
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("show transaction_deferrable")
+            val = cursor.fetchone()[0]
+        finally:
+            cursor.close()
+            dbapi_conn.rollback()
+        eq_(val, "off")
+
+    def test_readonly_flag_engine(self):
+        engine = engines.testing_engine(
+            options={
+                "execution_options": dict(
+                    isolation_level="SERIALIZABLE", postgresql_readonly=True
+                )
+            }
+        )
+        for i in range(2):
+            with engine.connect() as conn:
+                dbapi_conn = conn.connection.connection
+
+                cursor = dbapi_conn.cursor()
+                cursor.execute("show transaction_read_only")
+                val = cursor.fetchone()[0]
+                cursor.close()
+                eq_(val, "on")
+
+            cursor = dbapi_conn.cursor()
+            try:
+                cursor.execute("show transaction_read_only")
+                val = cursor.fetchone()[0]
+            finally:
+                cursor.close()
+                dbapi_conn.rollback()
+            eq_(val, "off")
+
+    def test_deferrable_flag_engine(self):
+        engine = engines.testing_engine(
+            options={
+                "execution_options": dict(
+                    isolation_level="SERIALIZABLE", postgresql_deferrable=True
+                )
+            }
+        )
+
+        for i in range(2):
+            with engine.connect() as conn:
+                # asyncpg but not for deferrable?  which the PG docs actually
+                # state.  weird
+                dbapi_conn = conn.connection.connection
+
+                cursor = dbapi_conn.cursor()
+                cursor.execute("show transaction_deferrable")
+                val = cursor.fetchone()[0]
+                cursor.close()
+                eq_(val, "on")
+
+            cursor = dbapi_conn.cursor()
+            try:
+                cursor.execute("show transaction_deferrable")
+                val = cursor.fetchone()[0]
+            finally:
+                cursor.close()
+                dbapi_conn.rollback()
+            eq_(val, "off")
 
     @testing.requires.psycopg2_compatibility
     def test_psycopg2_non_standard_err(self):
@@ -611,7 +1008,7 @@ class MiscBackendTest(
             conn = testing.db.connect()
             trans = conn.begin()
             try:
-                conn.execute(
+                conn.exec_driver_sql(
                     """
 CREATE OR REPLACE FUNCTION note(message varchar) RETURNS integer AS $$
 BEGIN
@@ -621,8 +1018,8 @@ END;
 $$ LANGUAGE plpgsql;
 """
                 )
-                conn.execute("SELECT note('hi there')")
-                conn.execute("SELECT note('another note')")
+                conn.exec_driver_sql("SELECT note('hi there')")
+                conn.exec_driver_sql("SELECT note('another note')")
             finally:
                 trans.rollback()
         finally:
@@ -639,7 +1036,9 @@ $$ LANGUAGE plpgsql;
     @engines.close_open_connections
     def test_client_encoding(self):
         c = testing.db.connect()
-        current_encoding = c.execute("show client_encoding").fetchone()[0]
+        current_encoding = c.exec_driver_sql(
+            "show client_encoding"
+        ).fetchone()[0]
         c.close()
 
         # attempt to use an encoding that's not
@@ -651,7 +1050,7 @@ $$ LANGUAGE plpgsql;
 
         e = engines.testing_engine(options={"client_encoding": test_encoding})
         c = e.connect()
-        new_encoding = c.execute("show client_encoding").fetchone()[0]
+        new_encoding = c.exec_driver_sql("show client_encoding").fetchone()[0]
         eq_(new_encoding, test_encoding)
 
     @testing.requires.psycopg2_or_pg8000_compatibility
@@ -667,37 +1066,42 @@ $$ LANGUAGE plpgsql;
         assert_raises_message(
             exc.ProgrammingError,
             'prepared transaction with identifier "gilberte" does not exist',
-            c.execute,
+            c.exec_driver_sql,
             "commit prepared 'gilberte'",
         )
 
-    def test_extract(self):
+    def test_extract(self, connection):
         fivedaysago = testing.db.scalar(
-            select([func.now()])
+            select(func.now().op("at time zone")("UTC"))
         ) - datetime.timedelta(days=5)
+
         for field, exp in (
             ("year", fivedaysago.year),
             ("month", fivedaysago.month),
             ("day", fivedaysago.day),
         ):
-            r = testing.db.execute(
+            r = connection.execute(
                 select(
-                    [extract(field, func.now() + datetime.timedelta(days=-5))]
+                    extract(
+                        field,
+                        func.now().op("at time zone")("UTC")
+                        + datetime.timedelta(days=-5),
+                    )
                 )
             ).scalar()
             eq_(r, exp)
 
     @testing.provide_metadata
-    def test_checksfor_sequence(self):
+    def test_checksfor_sequence(self, connection):
         meta1 = self.metadata
         seq = Sequence("fooseq")
         t = Table("mytable", meta1, Column("col1", Integer, seq))
-        seq.drop()
-        testing.db.execute("CREATE SEQUENCE fooseq")
-        t.create(checkfirst=True)
+        seq.drop(connection)
+        connection.execute(text("CREATE SEQUENCE fooseq"))
+        t.create(connection, checkfirst=True)
 
     @testing.provide_metadata
-    def test_schema_roundtrips(self):
+    def test_schema_roundtrips(self, connection):
         meta = self.metadata
         users = Table(
             "users",
@@ -706,33 +1110,41 @@ $$ LANGUAGE plpgsql;
             Column("name", String(50)),
             schema="test_schema",
         )
-        users.create()
-        users.insert().execute(id=1, name="name1")
-        users.insert().execute(id=2, name="name2")
-        users.insert().execute(id=3, name="name3")
-        users.insert().execute(id=4, name="name4")
+        users.create(connection)
+        connection.execute(users.insert(), dict(id=1, name="name1"))
+        connection.execute(users.insert(), dict(id=2, name="name2"))
+        connection.execute(users.insert(), dict(id=3, name="name3"))
+        connection.execute(users.insert(), dict(id=4, name="name4"))
         eq_(
-            users.select().where(users.c.name == "name2").execute().fetchall(),
+            connection.execute(
+                users.select().where(users.c.name == "name2")
+            ).fetchall(),
             [(2, "name2")],
         )
         eq_(
-            users.select(use_labels=True)
-            .where(users.c.name == "name2")
-            .execute()
-            .fetchall(),
+            connection.execute(
+                users.select()
+                .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+                .where(users.c.name == "name2")
+            ).fetchall(),
             [(2, "name2")],
         )
-        users.delete().where(users.c.id == 3).execute()
+        connection.execute(users.delete().where(users.c.id == 3))
         eq_(
-            users.select().where(users.c.name == "name3").execute().fetchall(),
+            connection.execute(
+                users.select().where(users.c.name == "name3")
+            ).fetchall(),
             [],
         )
-        users.update().where(users.c.name == "name4").execute(name="newname")
+        connection.execute(
+            users.update().where(users.c.name == "name4"), dict(name="newname")
+        )
         eq_(
-            users.select(use_labels=True)
-            .where(users.c.id == 4)
-            .execute()
-            .fetchall(),
+            connection.execute(
+                users.select()
+                .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+                .where(users.c.id == 4)
+            ).fetchall(),
             [(4, "newname")],
         )
 
@@ -743,51 +1155,49 @@ $$ LANGUAGE plpgsql;
             eq_(
                 conn.scalar(
                     select(
-                        [
-                            cast(
-                                literal(quoted_name("some_name", False)),
-                                String,
-                            )
-                        ]
+                        cast(
+                            literal(quoted_name("some_name", False)),
+                            String,
+                        )
                     )
                 ),
                 "some_name",
             )
 
-    def test_preexecute_passivedefault(self):
+    @testing.provide_metadata
+    def test_preexecute_passivedefault(self, connection):
         """test that when we get a primary key column back from
         reflecting a table which has a default value on it, we pre-
         execute that DefaultClause upon insert."""
 
-        try:
-            meta = MetaData(testing.db)
-            testing.db.execute(
+        meta = self.metadata
+        connection.execute(
+            text(
                 """
-             CREATE TABLE speedy_users
-             (
-                 speedy_user_id   SERIAL     PRIMARY KEY,
-
-                 user_name        VARCHAR    NOT NULL,
-                 user_password    VARCHAR    NOT NULL
-             );
-            """
+                 CREATE TABLE speedy_users
+                 (
+                     speedy_user_id   SERIAL     PRIMARY KEY,
+                     user_name        VARCHAR    NOT NULL,
+                     user_password    VARCHAR    NOT NULL
+                 );
+                """
             )
-            t = Table("speedy_users", meta, autoload=True)
-            r = t.insert().execute(user_name="user", user_password="lala")
-            assert r.inserted_primary_key == [1]
-            result = t.select().execute().fetchall()
-            assert result == [(1, "user", "lala")]
-        finally:
-            testing.db.execute("drop table speedy_users")
+        )
+        t = Table("speedy_users", meta, autoload_with=connection)
+        r = connection.execute(
+            t.insert(), dict(user_name="user", user_password="lala")
+        )
+        eq_(r.inserted_primary_key, (1,))
+        result = connection.execute(t.select()).fetchall()
+        assert result == [(1, "user", "lala")]
+        connection.execute(text("DROP TABLE speedy_users"))
 
     @testing.requires.psycopg2_or_pg8000_compatibility
-    def test_numeric_raise(self):
+    def test_numeric_raise(self, connection):
         stmt = text("select cast('hi' as char) as hi").columns(hi=Numeric)
-        assert_raises(exc.InvalidRequestError, testing.db.execute, stmt)
+        assert_raises(exc.InvalidRequestError, connection.execute, stmt)
 
-    @testing.only_if(
-        "postgresql >= 8.2", "requires standard_conforming_strings"
-    )
+    @testing.only_on("postgresql+psycopg2")
     def test_serial_integer(self):
         class BITD(TypeDecorator):
             impl = Integer
@@ -827,7 +1237,7 @@ $$ LANGUAGE plpgsql;
             t = Table("t", m, Column("c", type_, primary_key=True))
 
             if version:
-                dialect = postgresql.dialect()
+                dialect = testing.db.dialect.__class__()
                 dialect._get_server_version_info = mock.Mock(
                     return_value=version
                 )
@@ -850,7 +1260,7 @@ $$ LANGUAGE plpgsql;
             ne_(conn.connection.status, STATUS_IN_TRANSACTION)
 
 
-class AutocommitTextTest(test_execute.AutocommitTextTest):
+class AutocommitTextTest(test_deprecations.AutocommitTextTest):
     __only_on__ = "postgresql"
 
     def test_grant(self):

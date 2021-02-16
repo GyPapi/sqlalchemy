@@ -1,20 +1,25 @@
 from sqlalchemy import cast
+from sqlalchemy import DateTime
 from sqlalchemy import event
 from sqlalchemy import exc
 from sqlalchemy import FetchedValue
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
+from sqlalchemy import Identity
+from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import JSON
 from sqlalchemy import literal
 from sqlalchemy import select
+from sqlalchemy import Sequence
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import util
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import backref
-from sqlalchemy.orm import create_session
+from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
@@ -25,8 +30,11 @@ from sqlalchemy.testing import config
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.assertsql import Conditional
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.mock import patch
 from sqlalchemy.testing.schema import Column
@@ -70,7 +78,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users, properties={"addresses": relationship(Address)})
         mapper(Address, addresses)
-        sess = create_session()
+        sess = fixture_session()
 
         a1, a2 = Address(email_address="a1"), Address(email_address="a2")
         u1 = User(name="u1", addresses=[a1, a2])
@@ -82,15 +90,30 @@ class RudimentaryFlushTest(UOWTest):
             CompiledSQL(
                 "INSERT INTO users (name) VALUES (:name)", {"name": "u1"}
             ),
-            CompiledSQL(
-                "INSERT INTO addresses (user_id, email_address) "
-                "VALUES (:user_id, :email_address)",
-                lambda ctx: {"email_address": "a1", "user_id": u1.id},
-            ),
-            CompiledSQL(
-                "INSERT INTO addresses (user_id, email_address) "
-                "VALUES (:user_id, :email_address)",
-                lambda ctx: {"email_address": "a2", "user_id": u1.id},
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO addresses (user_id, email_address) "
+                        "VALUES (:user_id, :email_address)",
+                        lambda ctx: [
+                            {"email_address": "a1", "user_id": u1.id},
+                            {"email_address": "a2", "user_id": u1.id},
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO addresses (user_id, email_address) "
+                        "VALUES (:user_id, :email_address)",
+                        lambda ctx: {"email_address": "a1", "user_id": u1.id},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO addresses (user_id, email_address) "
+                        "VALUES (:user_id, :email_address)",
+                        lambda ctx: {"email_address": "a2", "user_id": u1.id},
+                    ),
+                ],
             ),
         )
 
@@ -104,7 +127,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users, properties={"addresses": relationship(Address)})
         mapper(Address, addresses)
-        sess = create_session()
+        sess = fixture_session()
         a1, a2 = Address(email_address="a1"), Address(email_address="a2")
         u1 = User(name="u1", addresses=[a1, a2])
         sess.add(u1)
@@ -135,7 +158,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users, properties={"addresses": relationship(Address)})
         mapper(Address, addresses)
-        sess = create_session()
+        sess = fixture_session()
         a1, a2 = Address(email_address="a1"), Address(email_address="a2")
         u1 = User(name="u1", addresses=[a1, a2])
         sess.add(u1)
@@ -168,7 +191,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users)
         mapper(Address, addresses, properties={"user": relationship(User)})
-        sess = create_session()
+        sess = fixture_session()
 
         u1 = User(name="u1")
         a1, a2 = (
@@ -183,15 +206,30 @@ class RudimentaryFlushTest(UOWTest):
             CompiledSQL(
                 "INSERT INTO users (name) VALUES (:name)", {"name": "u1"}
             ),
-            CompiledSQL(
-                "INSERT INTO addresses (user_id, email_address) "
-                "VALUES (:user_id, :email_address)",
-                lambda ctx: {"email_address": "a1", "user_id": u1.id},
-            ),
-            CompiledSQL(
-                "INSERT INTO addresses (user_id, email_address) "
-                "VALUES (:user_id, :email_address)",
-                lambda ctx: {"email_address": "a2", "user_id": u1.id},
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO addresses (user_id, email_address) "
+                        "VALUES (:user_id, :email_address)",
+                        lambda ctx: [
+                            {"email_address": "a1", "user_id": u1.id},
+                            {"email_address": "a2", "user_id": u1.id},
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO addresses (user_id, email_address) "
+                        "VALUES (:user_id, :email_address)",
+                        lambda ctx: {"email_address": "a1", "user_id": u1.id},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO addresses (user_id, email_address) "
+                        "VALUES (:user_id, :email_address)",
+                        lambda ctx: {"email_address": "a2", "user_id": u1.id},
+                    ),
+                ],
             ),
         )
 
@@ -205,7 +243,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users)
         mapper(Address, addresses, properties={"user": relationship(User)})
-        sess = create_session()
+        sess = fixture_session()
 
         u1 = User(name="u1")
         a1, a2 = (
@@ -240,7 +278,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users)
         mapper(Address, addresses, properties={"user": relationship(User)})
-        sess = create_session()
+        sess = fixture_session()
 
         u1 = User(name="u1")
         a1, a2 = (
@@ -285,7 +323,7 @@ class RudimentaryFlushTest(UOWTest):
             Address(email_address="c2", parent=parent),
         )
 
-        session = Session()
+        session = fixture_session()
         session.add_all([c1, c2])
         session.add(parent)
 
@@ -366,7 +404,7 @@ class RudimentaryFlushTest(UOWTest):
             Address(email_address="c2", parent=parent),
         )
 
-        session = Session()
+        session = fixture_session()
         session.add_all([c1, c2])
         session.add(parent)
 
@@ -431,7 +469,7 @@ class RudimentaryFlushTest(UOWTest):
             Address(email_address="c2", parent=parent),
         )
 
-        session = Session()
+        session = fixture_session()
         session.add_all([c1, c2])
         session.add(parent)
 
@@ -488,7 +526,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users)
         mapper(Address, addresses, properties={"user": relationship(User)})
-        sess = create_session()
+        sess = fixture_session()
 
         u1 = User(name="u1")
         a1, a2 = (
@@ -519,7 +557,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(User, users)
         mapper(Address, addresses, properties={"user": relationship(User)})
-        sess = create_session()
+        sess = fixture_session()
 
         u1 = User(name="u1")
         a1, a2 = (
@@ -560,7 +598,7 @@ class RudimentaryFlushTest(UOWTest):
         mapper(User, users)
         mapper(Address, addresses, properties={"parent": relationship(User)})
 
-        sess = create_session()
+        sess = fixture_session()
 
         u1 = User(id=1, name="u1")
         a1 = Address(id=1, user_id=1, email_address="a2")
@@ -599,7 +637,7 @@ class RudimentaryFlushTest(UOWTest):
 
         mapper(Node, nodes, properties={"children": relationship(Node)})
 
-        sess = create_session()
+        sess = fixture_session()
 
         n1 = Node(id=1)
         n2 = Node(id=2, parent_id=1)
@@ -641,22 +679,20 @@ class RudimentaryFlushTest(UOWTest):
         )
         mapper(Keyword, keywords)
 
-        sess = create_session()
+        sess = fixture_session()
         k1 = Keyword(name="k1")
         i1 = Item(description="i1", keywords=[k1])
         sess.add(i1)
         self.assert_sql_execution(
             testing.db,
             sess.flush,
-            AllOf(
-                CompiledSQL(
-                    "INSERT INTO keywords (name) VALUES (:name)",
-                    {"name": "k1"},
-                ),
-                CompiledSQL(
-                    "INSERT INTO items (description) VALUES (:description)",
-                    {"description": "i1"},
-                ),
+            CompiledSQL(
+                "INSERT INTO items (description) VALUES (:description)",
+                {"description": "i1"},
+            ),
+            CompiledSQL(
+                "INSERT INTO keywords (name) VALUES (:name)",
+                {"name": "k1"},
             ),
             CompiledSQL(
                 "INSERT INTO item_keywords (item_id, keyword_id) "
@@ -692,7 +728,7 @@ class RudimentaryFlushTest(UOWTest):
             addresses,
             properties={"user": relationship(User, passive_updates=True)},
         )
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(name="ed")
         sess.add(u1)
         self._assert_uow_size(sess, 2)
@@ -708,51 +744,51 @@ class RudimentaryFlushTest(UOWTest):
         mapper(User, users, properties={"addresses": relationship(Address)})
         mapper(Address, addresses)
 
-        sess = create_session()
-        u1 = User(name="ed")
-        sess.add(u1)
-        self._assert_uow_size(sess, 2)
+        with fixture_session(autoflush=False) as sess:
+            u1 = User(name="ed")
+            sess.add(u1)
+            self._assert_uow_size(sess, 2)
 
-        sess.flush()
+            sess.flush()
 
-        u1.name = "jack"
+            u1.name = "jack"
 
-        self._assert_uow_size(sess, 2)
-        sess.flush()
+            self._assert_uow_size(sess, 2)
+            sess.flush()
 
-        a1 = Address(email_address="foo")
-        sess.add(a1)
-        sess.flush()
+            a1 = Address(email_address="foo")
+            sess.add(a1)
+            sess.flush()
 
-        u1.addresses.append(a1)
+            u1.addresses.append(a1)
 
-        self._assert_uow_size(sess, 6)
+            self._assert_uow_size(sess, 6)
 
-        sess.flush()
+            sess.commit()
 
-        sess = create_session()
-        u1 = sess.query(User).first()
-        u1.name = "ed"
-        self._assert_uow_size(sess, 2)
+        with fixture_session(autoflush=False) as sess:
+            u1 = sess.query(User).first()
+            u1.name = "ed"
+            self._assert_uow_size(sess, 2)
 
-        u1.addresses
-        self._assert_uow_size(sess, 6)
+            u1.addresses
+            self._assert_uow_size(sess, 6)
 
 
 class SingleCycleTest(UOWTest):
-    def teardown(self):
+    def teardown_test(self):
         engines.testing_reaper.rollback_all()
         # mysql can't handle delete from nodes
         # since it doesn't deal with the FKs correctly,
         # so wipe out the parent_id first
-        testing.db.execute(self.tables.nodes.update().values(parent_id=None))
-        super(SingleCycleTest, self).teardown()
+        with testing.db.begin() as conn:
+            conn.execute(self.tables.nodes.update().values(parent_id=None))
 
     def test_one_to_many_save(self):
         Node, nodes = self.classes.Node, self.tables.nodes
 
         mapper(Node, nodes, properties={"children": relationship(Node)})
-        sess = create_session()
+        sess = fixture_session()
 
         n2, n3 = Node(data="n2"), Node(data="n3")
         n1 = Node(data="n1", children=[n2, n3])
@@ -767,17 +803,32 @@ class SingleCycleTest(UOWTest):
                 "(:parent_id, :data)",
                 {"parent_id": None, "data": "n1"},
             ),
-            AllOf(
-                CompiledSQL(
-                    "INSERT INTO nodes (parent_id, data) VALUES "
-                    "(:parent_id, :data)",
-                    lambda ctx: {"parent_id": n1.id, "data": "n2"},
-                ),
-                CompiledSQL(
-                    "INSERT INTO nodes (parent_id, data) VALUES "
-                    "(:parent_id, :data)",
-                    lambda ctx: {"parent_id": n1.id, "data": "n3"},
-                ),
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: [
+                            {"parent_id": n1.id, "data": "n2"},
+                            {"parent_id": n1.id, "data": "n3"},
+                        ],
+                    ),
+                ],
+                [
+                    AllOf(
+                        CompiledSQL(
+                            "INSERT INTO nodes (parent_id, data) VALUES "
+                            "(:parent_id, :data)",
+                            lambda ctx: {"parent_id": n1.id, "data": "n2"},
+                        ),
+                        CompiledSQL(
+                            "INSERT INTO nodes (parent_id, data) VALUES "
+                            "(:parent_id, :data)",
+                            lambda ctx: {"parent_id": n1.id, "data": "n3"},
+                        ),
+                    ),
+                ],
             ),
         )
 
@@ -785,7 +836,7 @@ class SingleCycleTest(UOWTest):
         Node, nodes = self.classes.Node, self.tables.nodes
 
         mapper(Node, nodes, properties={"children": relationship(Node)})
-        sess = create_session()
+        sess = fixture_session()
 
         n2, n3 = Node(data="n2", children=[]), Node(data="n3", children=[])
         n1 = Node(data="n1", children=[n2, n3])
@@ -813,7 +864,7 @@ class SingleCycleTest(UOWTest):
         Node, nodes = self.classes.Node, self.tables.nodes
 
         mapper(Node, nodes, properties={"children": relationship(Node)})
-        sess = create_session()
+        sess = fixture_session()
 
         n2, n3 = Node(data="n2", children=[]), Node(data="n3", children=[])
         n1 = Node(data="n1", children=[n2, n3])
@@ -825,15 +876,13 @@ class SingleCycleTest(UOWTest):
         self.assert_sql_execution(
             testing.db,
             sess.flush,
-            AllOf(
-                CompiledSQL(
-                    "UPDATE nodes SET parent_id=:parent_id "
-                    "WHERE nodes.id = :nodes_id",
-                    lambda ctx: [
-                        {"nodes_id": n3.id, "parent_id": None},
-                        {"nodes_id": n2.id, "parent_id": None},
-                    ],
-                )
+            CompiledSQL(
+                "UPDATE nodes SET parent_id=:parent_id "
+                "WHERE nodes.id = :nodes_id",
+                lambda ctx: [
+                    {"nodes_id": n3.id, "parent_id": None},
+                    {"nodes_id": n2.id, "parent_id": None},
+                ],
             ),
             CompiledSQL(
                 "DELETE FROM nodes WHERE nodes.id = :id",
@@ -849,7 +898,7 @@ class SingleCycleTest(UOWTest):
             nodes,
             properties={"parent": relationship(Node, remote_side=nodes.c.id)},
         )
-        sess = create_session()
+        sess = fixture_session()
 
         n1 = Node(data="n1")
         n2, n3 = Node(data="n2", parent=n1), Node(data="n3", parent=n1)
@@ -864,17 +913,32 @@ class SingleCycleTest(UOWTest):
                 "(:parent_id, :data)",
                 {"parent_id": None, "data": "n1"},
             ),
-            AllOf(
-                CompiledSQL(
-                    "INSERT INTO nodes (parent_id, data) VALUES "
-                    "(:parent_id, :data)",
-                    lambda ctx: {"parent_id": n1.id, "data": "n2"},
-                ),
-                CompiledSQL(
-                    "INSERT INTO nodes (parent_id, data) VALUES "
-                    "(:parent_id, :data)",
-                    lambda ctx: {"parent_id": n1.id, "data": "n3"},
-                ),
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: [
+                            {"parent_id": n1.id, "data": "n2"},
+                            {"parent_id": n1.id, "data": "n3"},
+                        ],
+                    ),
+                ],
+                [
+                    AllOf(
+                        CompiledSQL(
+                            "INSERT INTO nodes (parent_id, data) VALUES "
+                            "(:parent_id, :data)",
+                            lambda ctx: {"parent_id": n1.id, "data": "n2"},
+                        ),
+                        CompiledSQL(
+                            "INSERT INTO nodes (parent_id, data) VALUES "
+                            "(:parent_id, :data)",
+                            lambda ctx: {"parent_id": n1.id, "data": "n3"},
+                        ),
+                    ),
+                ],
             ),
         )
 
@@ -886,7 +950,7 @@ class SingleCycleTest(UOWTest):
             nodes,
             properties={"parent": relationship(Node, remote_side=nodes.c.id)},
         )
-        sess = create_session()
+        sess = fixture_session()
 
         n1 = Node(data="n1")
         n2, n3 = Node(data="n2", parent=n1), Node(data="n3", parent=n1)
@@ -918,30 +982,30 @@ class SingleCycleTest(UOWTest):
             nodes,
             properties={"parent": relationship(Node, remote_side=nodes.c.id)},
         )
-        sess = create_session()
-        n1 = Node(data="n1")
-        n2 = Node(data="n2", parent=n1)
-        sess.add_all([n1, n2])
-        sess.flush()
-        sess.close()
+        with fixture_session() as sess:
+            n1 = Node(data="n1")
+            n2 = Node(data="n2", parent=n1)
+            sess.add_all([n1, n2])
+            sess.commit()
 
-        n2 = sess.query(Node).filter_by(data="n2").one()
-        n2.parent = None
-        self.assert_sql_execution(
-            testing.db,
-            sess.flush,
-            CompiledSQL(
-                "UPDATE nodes SET parent_id=:parent_id WHERE "
-                "nodes.id = :nodes_id",
-                lambda ctx: {"parent_id": None, "nodes_id": n2.id},
-            ),
-        )
+        with fixture_session() as sess:
+            n2 = sess.query(Node).filter_by(data="n2").one()
+            n2.parent = None
+            self.assert_sql_execution(
+                testing.db,
+                sess.flush,
+                CompiledSQL(
+                    "UPDATE nodes SET parent_id=:parent_id WHERE "
+                    "nodes.id = :nodes_id",
+                    lambda ctx: {"parent_id": None, "nodes_id": n2.id},
+                ),
+            )
 
     def test_cycle_rowswitch(self):
         Node, nodes = self.classes.Node, self.tables.nodes
 
         mapper(Node, nodes, properties={"children": relationship(Node)})
-        sess = create_session()
+        sess = fixture_session()
 
         n2, n3 = Node(data="n2", children=[]), Node(data="n3", children=[])
         n1 = Node(data="n1", children=[n2])
@@ -965,7 +1029,7 @@ class SingleCycleTest(UOWTest):
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
 
         n2, n3 = Node(data="n2", children=[]), Node(data="n3", children=[])
         n1 = Node(data="n1", children=[n2])
@@ -991,7 +1055,7 @@ class SingleCycleTest(UOWTest):
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
         n1 = Node(data="n1")
         n1.children.append(Node(data="n11"))
         n12 = Node(data="n12")
@@ -1009,35 +1073,67 @@ class SingleCycleTest(UOWTest):
                 "(:parent_id, :data)",
                 lambda ctx: {"parent_id": None, "data": "n1"},
             ),
-            CompiledSQL(
-                "INSERT INTO nodes (parent_id, data) VALUES "
-                "(:parent_id, :data)",
-                lambda ctx: {"parent_id": n1.id, "data": "n11"},
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: [
+                            {"parent_id": n1.id, "data": "n11"},
+                            {"parent_id": n1.id, "data": "n12"},
+                            {"parent_id": n1.id, "data": "n13"},
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: {"parent_id": n1.id, "data": "n11"},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: {"parent_id": n1.id, "data": "n12"},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: {"parent_id": n1.id, "data": "n13"},
+                    ),
+                ],
             ),
-            CompiledSQL(
-                "INSERT INTO nodes (parent_id, data) VALUES "
-                "(:parent_id, :data)",
-                lambda ctx: {"parent_id": n1.id, "data": "n12"},
-            ),
-            CompiledSQL(
-                "INSERT INTO nodes (parent_id, data) VALUES "
-                "(:parent_id, :data)",
-                lambda ctx: {"parent_id": n1.id, "data": "n13"},
-            ),
-            CompiledSQL(
-                "INSERT INTO nodes (parent_id, data) VALUES "
-                "(:parent_id, :data)",
-                lambda ctx: {"parent_id": n12.id, "data": "n121"},
-            ),
-            CompiledSQL(
-                "INSERT INTO nodes (parent_id, data) VALUES "
-                "(:parent_id, :data)",
-                lambda ctx: {"parent_id": n12.id, "data": "n122"},
-            ),
-            CompiledSQL(
-                "INSERT INTO nodes (parent_id, data) VALUES "
-                "(:parent_id, :data)",
-                lambda ctx: {"parent_id": n12.id, "data": "n123"},
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: [
+                            {"parent_id": n12.id, "data": "n121"},
+                            {"parent_id": n12.id, "data": "n122"},
+                            {"parent_id": n12.id, "data": "n123"},
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: {"parent_id": n12.id, "data": "n121"},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: {"parent_id": n12.id, "data": "n122"},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO nodes (parent_id, data) VALUES "
+                        "(:parent_id, :data)",
+                        lambda ctx: {"parent_id": n12.id, "data": "n123"},
+                    ),
+                ],
             ),
         )
 
@@ -1045,29 +1141,29 @@ class SingleCycleTest(UOWTest):
         Node, nodes = self.classes.Node, self.tables.nodes
 
         mapper(Node, nodes, properties={"children": relationship(Node)})
-        sess = create_session()
-        n1 = Node(data="ed")
-        sess.add(n1)
-        self._assert_uow_size(sess, 2)
+        with fixture_session() as sess:
+            n1 = Node(data="ed")
+            sess.add(n1)
+            self._assert_uow_size(sess, 2)
 
-        sess.flush()
+            sess.flush()
 
-        n1.data = "jack"
+            n1.data = "jack"
 
-        self._assert_uow_size(sess, 2)
-        sess.flush()
+            self._assert_uow_size(sess, 2)
+            sess.flush()
 
-        n2 = Node(data="foo")
-        sess.add(n2)
-        sess.flush()
+            n2 = Node(data="foo")
+            sess.add(n2)
+            sess.flush()
 
-        n1.children.append(n2)
+            n1.children.append(n2)
 
-        self._assert_uow_size(sess, 3)
+            self._assert_uow_size(sess, 3)
 
-        sess.flush()
+            sess.commit()
 
-        sess = create_session()
+        sess = fixture_session(autoflush=False)
         n1 = sess.query(Node).first()
         n1.data = "ed"
         self._assert_uow_size(sess, 2)
@@ -1087,7 +1183,7 @@ class SingleCycleTest(UOWTest):
         parent = Node()
         c1, c2 = Node(parent=parent), Node(parent=parent)
 
-        session = Session()
+        session = fixture_session()
         session.add_all([c1, c2])
         session.add(parent)
 
@@ -1193,7 +1289,7 @@ class SingleCyclePlusAttributeTest(
         )
         mapper(FooBar, foobars)
 
-        sess = create_session()
+        sess = fixture_session()
         n1 = Node(data="n1")
         n2 = Node(data="n2")
         n1.children.append(n2)
@@ -1263,110 +1359,111 @@ class SingleCycleM2MTest(
             },
         )
 
-        sess = create_session()
-        n1 = Node(data="n1")
-        n2 = Node(data="n2")
-        n3 = Node(data="n3")
-        n4 = Node(data="n4")
-        n5 = Node(data="n5")
+        with fixture_session(autoflush=False) as sess:
+            n1 = Node(data="n1")
+            n2 = Node(data="n2")
+            n3 = Node(data="n3")
+            n4 = Node(data="n4")
+            n5 = Node(data="n5")
 
-        n4.favorite = n3
-        n1.favorite = n5
-        n5.favorite = n2
+            n4.favorite = n3
+            n1.favorite = n5
+            n5.favorite = n2
 
-        n1.children = [n2, n3, n4]
-        n2.children = [n3, n5]
-        n3.children = [n5, n4]
+            n1.children = [n2, n3, n4]
+            n2.children = [n3, n5]
+            n3.children = [n5, n4]
 
-        sess.add_all([n1, n2, n3, n4, n5])
+            sess.add_all([n1, n2, n3, n4, n5])
 
-        # can't really assert the SQL on this easily
-        # since there's too many ways to insert the rows.
-        # so check the end result
-        sess.flush()
-        eq_(
-            sess.query(
-                node_to_nodes.c.left_node_id, node_to_nodes.c.right_node_id
+            # can't really assert the SQL on this easily
+            # since there's too many ways to insert the rows.
+            # so check the end result
+            sess.flush()
+            eq_(
+                sess.query(
+                    node_to_nodes.c.left_node_id, node_to_nodes.c.right_node_id
+                )
+                .order_by(
+                    node_to_nodes.c.left_node_id, node_to_nodes.c.right_node_id
+                )
+                .all(),
+                sorted(
+                    [
+                        (n1.id, n2.id),
+                        (n1.id, n3.id),
+                        (n1.id, n4.id),
+                        (n2.id, n3.id),
+                        (n2.id, n5.id),
+                        (n3.id, n5.id),
+                        (n3.id, n4.id),
+                    ]
+                ),
             )
-            .order_by(
-                node_to_nodes.c.left_node_id, node_to_nodes.c.right_node_id
+
+            sess.delete(n1)
+
+            self.assert_sql_execution(
+                testing.db,
+                sess.flush,
+                # this is n1.parents firing off, as it should, since
+                # passive_deletes is False for n1.parents
+                CompiledSQL(
+                    "SELECT nodes.id AS nodes_id, nodes.data AS nodes_data, "
+                    "nodes.favorite_node_id AS nodes_favorite_node_id FROM "
+                    "nodes, node_to_nodes WHERE :param_1 = "
+                    "node_to_nodes.right_node_id AND nodes.id = "
+                    "node_to_nodes.left_node_id",
+                    lambda ctx: {"param_1": n1.id},
+                ),
+                CompiledSQL(
+                    "DELETE FROM node_to_nodes WHERE "
+                    "node_to_nodes.left_node_id = :left_node_id AND "
+                    "node_to_nodes.right_node_id = :right_node_id",
+                    lambda ctx: [
+                        {"right_node_id": n2.id, "left_node_id": n1.id},
+                        {"right_node_id": n3.id, "left_node_id": n1.id},
+                        {"right_node_id": n4.id, "left_node_id": n1.id},
+                    ],
+                ),
+                CompiledSQL(
+                    "DELETE FROM nodes WHERE nodes.id = :id",
+                    lambda ctx: {"id": n1.id},
+                ),
             )
-            .all(),
-            sorted(
-                [
-                    (n1.id, n2.id),
-                    (n1.id, n3.id),
-                    (n1.id, n4.id),
-                    (n2.id, n3.id),
-                    (n2.id, n5.id),
-                    (n3.id, n5.id),
-                    (n3.id, n4.id),
-                ]
-            ),
-        )
 
-        sess.delete(n1)
+            for n in [n2, n3, n4, n5]:
+                sess.delete(n)
 
-        self.assert_sql_execution(
-            testing.db,
-            sess.flush,
-            # this is n1.parents firing off, as it should, since
-            # passive_deletes is False for n1.parents
-            CompiledSQL(
-                "SELECT nodes.id AS nodes_id, nodes.data AS nodes_data, "
-                "nodes.favorite_node_id AS nodes_favorite_node_id FROM "
-                "nodes, node_to_nodes WHERE :param_1 = "
-                "node_to_nodes.right_node_id AND nodes.id = "
-                "node_to_nodes.left_node_id",
-                lambda ctx: {"param_1": n1.id},
-            ),
-            CompiledSQL(
-                "DELETE FROM node_to_nodes WHERE "
-                "node_to_nodes.left_node_id = :left_node_id AND "
-                "node_to_nodes.right_node_id = :right_node_id",
-                lambda ctx: [
-                    {"right_node_id": n2.id, "left_node_id": n1.id},
-                    {"right_node_id": n3.id, "left_node_id": n1.id},
-                    {"right_node_id": n4.id, "left_node_id": n1.id},
-                ],
-            ),
-            CompiledSQL(
-                "DELETE FROM nodes WHERE nodes.id = :id",
-                lambda ctx: {"id": n1.id},
-            ),
-        )
+            # load these collections
+            # outside of the flush() below
+            n4.children
+            n5.children
 
-        for n in [n2, n3, n4, n5]:
-            sess.delete(n)
-
-        # load these collections
-        # outside of the flush() below
-        n4.children
-        n5.children
-
-        self.assert_sql_execution(
-            testing.db,
-            sess.flush,
-            CompiledSQL(
-                "DELETE FROM node_to_nodes WHERE node_to_nodes.left_node_id "
-                "= :left_node_id AND node_to_nodes.right_node_id = "
-                ":right_node_id",
-                lambda ctx: [
-                    {"right_node_id": n5.id, "left_node_id": n3.id},
-                    {"right_node_id": n4.id, "left_node_id": n3.id},
-                    {"right_node_id": n3.id, "left_node_id": n2.id},
-                    {"right_node_id": n5.id, "left_node_id": n2.id},
-                ],
-            ),
-            CompiledSQL(
-                "DELETE FROM nodes WHERE nodes.id = :id",
-                lambda ctx: [{"id": n4.id}, {"id": n5.id}],
-            ),
-            CompiledSQL(
-                "DELETE FROM nodes WHERE nodes.id = :id",
-                lambda ctx: [{"id": n2.id}, {"id": n3.id}],
-            ),
-        )
+            self.assert_sql_execution(
+                testing.db,
+                sess.flush,
+                CompiledSQL(
+                    "DELETE FROM node_to_nodes "
+                    "WHERE node_to_nodes.left_node_id "
+                    "= :left_node_id AND node_to_nodes.right_node_id = "
+                    ":right_node_id",
+                    lambda ctx: [
+                        {"right_node_id": n5.id, "left_node_id": n3.id},
+                        {"right_node_id": n4.id, "left_node_id": n3.id},
+                        {"right_node_id": n3.id, "left_node_id": n2.id},
+                        {"right_node_id": n5.id, "left_node_id": n2.id},
+                    ],
+                ),
+                CompiledSQL(
+                    "DELETE FROM nodes WHERE nodes.id = :id",
+                    lambda ctx: [{"id": n4.id}, {"id": n5.id}],
+                ),
+                CompiledSQL(
+                    "DELETE FROM nodes WHERE nodes.id = :id",
+                    lambda ctx: [{"id": n2.id}, {"id": n3.id}],
+                ),
+            )
 
 
 class RowswitchAccountingTest(fixtures.MappedTest):
@@ -1412,7 +1509,7 @@ class RowswitchAccountingTest(fixtures.MappedTest):
     def test_switch_on_update(self):
         Parent, Child = self._fixture()
 
-        sess = create_session(autocommit=False)
+        sess = fixture_session(autocommit=False)
 
         p1 = Parent(id=1, child=Child())
         sess.add(p1)
@@ -1443,7 +1540,7 @@ class RowswitchAccountingTest(fixtures.MappedTest):
     def test_switch_on_delete(self):
         Parent, Child = self._fixture()
 
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         sess.add(p1)
         sess.flush()
@@ -1455,7 +1552,7 @@ class RowswitchAccountingTest(fixtures.MappedTest):
 
         eq_(
             sess.scalar(
-                select([func.count("*")]).select_from(self.tables.parent)
+                select(func.count("*")).select_from(self.tables.parent)
             ),
             0,
         )
@@ -1511,7 +1608,7 @@ class RowswitchM2OTest(fixtures.MappedTest):
         # change that previously showed up as nothing.
 
         A, B, C = self._fixture()
-        sess = Session()
+        sess = fixture_session()
 
         sess.add(A(id=1, bs=[B(id=1, c=C(id=1))]))
         sess.commit()
@@ -1523,7 +1620,7 @@ class RowswitchM2OTest(fixtures.MappedTest):
 
     def test_set_none_w_get_replaces_m2o(self):
         A, B, C = self._fixture()
-        sess = Session()
+        sess = fixture_session()
 
         sess.add(A(id=1, bs=[B(id=1, c=C(id=1))]))
         sess.commit()
@@ -1542,7 +1639,7 @@ class RowswitchM2OTest(fixtures.MappedTest):
         # shows, we can't rely on this - the get of None will blow
         # away the history.
         A, B, C = self._fixture()
-        sess = Session()
+        sess = fixture_session()
 
         sess.add(A(id=1, bs=[B(id=1, data="somedata")]))
         sess.commit()
@@ -1554,7 +1651,7 @@ class RowswitchM2OTest(fixtures.MappedTest):
 
     def test_set_none_w_get_replaces_scalar(self):
         A, B, C = self._fixture()
-        sess = Session()
+        sess = fixture_session()
 
         sess.add(A(id=1, bs=[B(id=1, data="somedata")]))
         sess.commit()
@@ -1614,7 +1711,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
     @testing.requires.sane_rowcount
     def test_update_single_missing(self):
         Parent, Child = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2)
         sess.add(p1)
         sess.flush()
@@ -1642,10 +1739,10 @@ class BasicStaleChecksTest(fixtures.MappedTest):
             config.db.dialect, "supports_sane_multi_rowcount", False
         ):
             with patch(
-                "sqlalchemy.engine.result.ResultProxy.rowcount", rowcount
+                "sqlalchemy.engine.cursor.CursorResult.rowcount", rowcount
             ):
                 Parent, Child = self._fixture()
-                sess = Session()
+                sess = fixture_session()
                 p1 = Parent(id=1, data=2)
                 sess.add(p1)
                 sess.flush()
@@ -1672,10 +1769,10 @@ class BasicStaleChecksTest(fixtures.MappedTest):
             config.db.dialect, "supports_sane_multi_rowcount", False
         ):
             with patch(
-                "sqlalchemy.engine.result.ResultProxy.rowcount", rowcount
+                "sqlalchemy.engine.cursor.CursorResult.rowcount", rowcount
             ):
                 Parent, Child = self._fixture()
-                sess = Session()
+                sess = fixture_session()
                 p1 = Parent(id=1, data=2)
                 p2 = Parent(id=2, data=3)
                 sess.add_all([p1, p2])
@@ -1702,10 +1799,10 @@ class BasicStaleChecksTest(fixtures.MappedTest):
             config.db.dialect, "supports_sane_multi_rowcount", False
         ):
             with patch(
-                "sqlalchemy.engine.result.ResultProxy.rowcount", rowcount
+                "sqlalchemy.engine.cursor.CursorResult.rowcount", rowcount
             ):
                 Parent, Child = self._fixture()
-                sess = Session()
+                sess = fixture_session()
                 p1 = Parent(id=1, data=1)
                 sess.add(p1)
                 sess.flush()
@@ -1723,7 +1820,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
     @testing.requires.sane_rowcount
     def test_delete_twice(self):
         Parent, Child = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         sess.add(p1)
         sess.commit()
@@ -1743,7 +1840,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
     @testing.requires.sane_multi_rowcount
     def test_delete_multi_missing_warning(self):
         Parent, Child = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         p2 = Parent(id=2, data=3, child=None)
         sess.add_all([p1, p2])
@@ -1764,7 +1861,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
         # raise occurs for single row UPDATE that misses even if
         # supports_sane_multi_rowcount is False
         Parent, Child = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         sess.add(p1)
         sess.flush()
@@ -1787,7 +1884,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
         # supports_sane_multi_rowcount is False, even if rowcount is still
         # correct
         Parent, Child = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         p2 = Parent(id=2, data=3, child=None)
         sess.add_all([p1, p2])
@@ -1805,7 +1902,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
 
     def test_delete_single_broken_multi_rowcount_still_warns(self):
         Parent, Child = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         sess.add(p1)
         sess.flush()
@@ -1827,7 +1924,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
 
     def test_delete_multi_broken_multi_rowcount_doesnt_warn(self):
         Parent, Child = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         p2 = Parent(id=2, data=3, child=None)
         sess.add_all([p1, p2])
@@ -1849,7 +1946,7 @@ class BasicStaleChecksTest(fixtures.MappedTest):
 
     def test_delete_multi_missing_allow(self):
         Parent, Child = self._fixture(confirm_deleted_rows=False)
-        sess = Session()
+        sess = fixture_session()
         p1 = Parent(id=1, data=2, child=None)
         p2 = Parent(id=2, data=3, child=None)
         sess.add_all([p1, p2])
@@ -1887,7 +1984,7 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
             pass
 
         mapper(T, t)
-        sess = Session()
+        sess = fixture_session()
         sess.add_all(
             [
                 T(data="t1"),
@@ -1907,8 +2004,23 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
         self.assert_sql_execution(
             testing.db,
             sess.flush,
-            CompiledSQL("INSERT INTO t (data) VALUES (:data)", {"data": "t1"}),
-            CompiledSQL("INSERT INTO t (data) VALUES (:data)", {"data": "t2"}),
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO t (data) VALUES (:data)",
+                        [{"data": "t1"}, {"data": "t2"}],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO t (data) VALUES (:data)", {"data": "t1"}
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO t (data) VALUES (:data)", {"data": "t2"}
+                    ),
+                ],
+            ),
             CompiledSQL(
                 "INSERT INTO t (id, data) VALUES (:id, :data)",
                 [
@@ -1971,7 +2083,7 @@ class LoadersUsingCommittedTest(UOWTest):
             },
         )
         mapper(Address, addresses)
-        return create_session(autocommit=False)
+        return fixture_session(expire_on_commit=False)
 
     def test_before_update_m2o(self):
         """Expect normal many to one attribute load behavior
@@ -2118,7 +2230,7 @@ class NoAttrEventInFlushTest(fixtures.MappedTest):
         event.listen(Thing.prefetch_val, "set", mock.prefetch_val)
         event.listen(Thing.returning_val, "set", mock.prefetch_val)
         t1 = Thing()
-        s = Session()
+        s = fixture_session()
         s.add(t1)
         s.flush()
 
@@ -2168,7 +2280,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_insert_defaults_present(self):
         Thing = self.classes.Thing
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (Thing(id=1, foo=5), Thing(id=2, foo=10))
 
@@ -2191,7 +2303,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_insert_defaults_present_as_expr(self):
         Thing = self.classes.Thing
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (
             Thing(id=1, foo=text("2 + 5")),
@@ -2250,50 +2362,66 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_insert_defaults_nonpresent(self):
         Thing = self.classes.Thing
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (Thing(id=1), Thing(id=2))
 
         s.add_all([t1, t2])
 
-        if testing.db.dialect.implicit_returning:
-            self.assert_sql_execution(
-                testing.db,
-                s.commit,
-                CompiledSQL(
-                    "INSERT INTO test (id) VALUES (%(id)s) RETURNING test.foo",
-                    [{"id": 1}],
-                    dialect="postgresql",
-                ),
-                CompiledSQL(
-                    "INSERT INTO test (id) VALUES (%(id)s) RETURNING test.foo",
-                    [{"id": 2}],
-                    dialect="postgresql",
-                ),
-            )
-        else:
-            self.assert_sql_execution(
-                testing.db,
-                s.commit,
-                CompiledSQL(
-                    "INSERT INTO test (id) VALUES (:id)",
-                    [{"id": 1}, {"id": 2}],
-                ),
-                CompiledSQL(
-                    "SELECT test.foo AS test_foo FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 1}],
-                ),
-                CompiledSQL(
-                    "SELECT test.foo AS test_foo FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 2}],
-                ),
-            )
+        self.assert_sql_execution(
+            testing.db,
+            s.commit,
+            Conditional(
+                testing.db.dialect.implicit_returning,
+                [
+                    Conditional(
+                        testing.db.dialect.insert_executemany_returning,
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id) VALUES (%(id)s) "
+                                "RETURNING test.foo",
+                                [{"id": 1}, {"id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id) VALUES (%(id)s) "
+                                "RETURNING test.foo",
+                                [{"id": 1}],
+                                dialect="postgresql",
+                            ),
+                            CompiledSQL(
+                                "INSERT INTO test (id) VALUES (%(id)s) "
+                                "RETURNING test.foo",
+                                [{"id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (id) VALUES (:id)",
+                        [{"id": 1}, {"id": 2}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test.foo AS test_foo FROM test "
+                        "WHERE test.id = :param_1",
+                        [{"param_1": 1}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test.foo AS test_foo FROM test "
+                        "WHERE test.id = :param_1",
+                        [{"param_1": 2}],
+                    ),
+                ],
+            ),
+        )
 
     def test_update_defaults_nonpresent(self):
         Thing2 = self.classes.Thing2
-        s = Session()
+        s = fixture_session()
 
         t1, t2, t3, t4 = (
             Thing2(id=1, foo=1, bar=2),
@@ -2312,70 +2440,71 @@ class EagerDefaultsTest(fixtures.MappedTest):
         t4.foo = 8
         t4.bar = 12
 
-        if testing.db.dialect.implicit_returning:
-            self.assert_sql_execution(
-                testing.db,
-                s.flush,
-                CompiledSQL(
-                    "UPDATE test2 SET foo=%(foo)s "
-                    "WHERE test2.id = %(test2_id)s "
-                    "RETURNING test2.bar",
-                    [{"foo": 5, "test2_id": 1}],
-                    dialect="postgresql",
-                ),
-                CompiledSQL(
-                    "UPDATE test2 SET foo=%(foo)s, bar=%(bar)s "
-                    "WHERE test2.id = %(test2_id)s",
-                    [{"foo": 6, "bar": 10, "test2_id": 2}],
-                    dialect="postgresql",
-                ),
-                CompiledSQL(
-                    "UPDATE test2 SET foo=%(foo)s "
-                    "WHERE test2.id = %(test2_id)s "
-                    "RETURNING test2.bar",
-                    [{"foo": 7, "test2_id": 3}],
-                    dialect="postgresql",
-                ),
-                CompiledSQL(
-                    "UPDATE test2 SET foo=%(foo)s, bar=%(bar)s "
-                    "WHERE test2.id = %(test2_id)s",
-                    [{"foo": 8, "bar": 12, "test2_id": 4}],
-                    dialect="postgresql",
-                ),
-            )
-        else:
-            self.assert_sql_execution(
-                testing.db,
-                s.flush,
-                CompiledSQL(
-                    "UPDATE test2 SET foo=:foo WHERE test2.id = :test2_id",
-                    [{"foo": 5, "test2_id": 1}],
-                ),
-                CompiledSQL(
-                    "UPDATE test2 SET foo=:foo, bar=:bar "
-                    "WHERE test2.id = :test2_id",
-                    [{"foo": 6, "bar": 10, "test2_id": 2}],
-                ),
-                CompiledSQL(
-                    "UPDATE test2 SET foo=:foo WHERE test2.id = :test2_id",
-                    [{"foo": 7, "test2_id": 3}],
-                ),
-                CompiledSQL(
-                    "UPDATE test2 SET foo=:foo, bar=:bar "
-                    "WHERE test2.id = :test2_id",
-                    [{"foo": 8, "bar": 12, "test2_id": 4}],
-                ),
-                CompiledSQL(
-                    "SELECT test2.bar AS test2_bar FROM test2 "
-                    "WHERE test2.id = :param_1",
-                    [{"param_1": 1}],
-                ),
-                CompiledSQL(
-                    "SELECT test2.bar AS test2_bar FROM test2 "
-                    "WHERE test2.id = :param_1",
-                    [{"param_1": 3}],
-                ),
-            )
+        self.assert_sql_execution(
+            testing.db,
+            s.flush,
+            Conditional(
+                testing.db.dialect.implicit_returning,
+                [
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=%(foo)s "
+                        "WHERE test2.id = %(test2_id)s "
+                        "RETURNING test2.bar",
+                        [{"foo": 5, "test2_id": 1}],
+                        dialect="postgresql",
+                    ),
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=%(foo)s, bar=%(bar)s "
+                        "WHERE test2.id = %(test2_id)s",
+                        [{"foo": 6, "bar": 10, "test2_id": 2}],
+                        dialect="postgresql",
+                    ),
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=%(foo)s "
+                        "WHERE test2.id = %(test2_id)s "
+                        "RETURNING test2.bar",
+                        [{"foo": 7, "test2_id": 3}],
+                        dialect="postgresql",
+                    ),
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=%(foo)s, bar=%(bar)s "
+                        "WHERE test2.id = %(test2_id)s",
+                        [{"foo": 8, "bar": 12, "test2_id": 4}],
+                        dialect="postgresql",
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=:foo WHERE test2.id = :test2_id",
+                        [{"foo": 5, "test2_id": 1}],
+                    ),
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=:foo, bar=:bar "
+                        "WHERE test2.id = :test2_id",
+                        [{"foo": 6, "bar": 10, "test2_id": 2}],
+                    ),
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=:foo WHERE test2.id = :test2_id",
+                        [{"foo": 7, "test2_id": 3}],
+                    ),
+                    CompiledSQL(
+                        "UPDATE test2 SET foo=:foo, bar=:bar "
+                        "WHERE test2.id = :test2_id",
+                        [{"foo": 8, "bar": 12, "test2_id": 4}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test2.bar AS test2_bar FROM test2 "
+                        "WHERE test2.id = :param_1",
+                        [{"param_1": 1}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test2.bar AS test2_bar FROM test2 "
+                        "WHERE test2.id = :param_1",
+                        [{"param_1": 3}],
+                    ),
+                ],
+            ),
+        )
 
         def go():
             eq_(t1.bar, 2)
@@ -2387,7 +2516,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_update_defaults_present_as_expr(self):
         Thing2 = self.classes.Thing2
-        s = Session()
+        s = fixture_session()
 
         t1, t2, t3, t4 = (
             Thing2(id=1, foo=1, bar=2),
@@ -2488,7 +2617,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_insert_defaults_bulk_insert(self):
         Thing = self.classes.Thing
-        s = Session()
+        s = fixture_session()
 
         mappings = [{"id": 1}, {"id": 2}]
 
@@ -2502,7 +2631,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_update_defaults_bulk_update(self):
         Thing2 = self.classes.Thing2
-        s = Session()
+        s = fixture_session()
 
         t1, t2, t3, t4 = (
             Thing2(id=1, foo=1, bar=2),
@@ -2541,7 +2670,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_update_defaults_present(self):
         Thing2 = self.classes.Thing2
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (Thing2(id=1, foo=1, bar=2), Thing2(id=2, foo=2, bar=3))
 
@@ -2563,7 +2692,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_insert_dont_fetch_nondefaults(self):
         Thing2 = self.classes.Thing2
-        s = Session()
+        s = fixture_session()
 
         t1 = Thing2(id=1, bar=2)
 
@@ -2580,7 +2709,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
     def test_update_dont_fetch_nondefaults(self):
         Thing2 = self.classes.Thing2
-        s = Session()
+        s = fixture_session()
 
         t1 = Thing2(id=1, bar=2)
 
@@ -2659,7 +2788,7 @@ class TypeWoBoolTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def test_update_against_none(self):
         Thing = self.classes.Thing
 
-        s = Session()
+        s = fixture_session()
         s.add(Thing(value=self.MyWidget("foo")))
         s.commit()
 
@@ -2672,7 +2801,7 @@ class TypeWoBoolTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def test_update_against_something_else(self):
         Thing = self.classes.Thing
 
-        s = Session()
+        s = fixture_session()
         s.add(Thing(value=self.MyWidget("foo")))
         s.commit()
 
@@ -2685,7 +2814,7 @@ class TypeWoBoolTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def test_no_update_no_change(self):
         Thing = self.classes.Thing
 
-        s = Session()
+        s = fixture_session()
         s.add(Thing(value=self.MyWidget("foo"), unrelated="unrelated"))
         s.commit()
 
@@ -2799,7 +2928,7 @@ class NullEvaluatingTest(fixtures.MappedTest, testing.AssertsExecutionResults):
 
     def _assert_col(self, name, value):
         Thing, AltNameThing = self.classes.Thing, self.classes.AltNameThing
-        s = Session()
+        s = fixture_session()
 
         col = getattr(Thing, name)
         obj = s.query(col).filter(col == value).one()
@@ -2812,7 +2941,7 @@ class NullEvaluatingTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def _test_insert(self, attr, expected):
         Thing, AltNameThing = self.classes.Thing, self.classes.AltNameThing
 
-        s = Session()
+        s = fixture_session()
         t1 = Thing(**{attr: None})
         s.add(t1)
 
@@ -2826,7 +2955,7 @@ class NullEvaluatingTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def _test_bulk_insert(self, attr, expected):
         Thing, AltNameThing = self.classes.Thing, self.classes.AltNameThing
 
-        s = Session()
+        s = fixture_session()
         s.bulk_insert_mappings(Thing, [{attr: None}])
         s.bulk_insert_mappings(AltNameThing, [{"_foo_" + attr: None}])
         s.commit()
@@ -2836,7 +2965,7 @@ class NullEvaluatingTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def _test_insert_novalue(self, attr, expected):
         Thing, AltNameThing = self.classes.Thing, self.classes.AltNameThing
 
-        s = Session()
+        s = fixture_session()
         t1 = Thing()
         s.add(t1)
 
@@ -2850,7 +2979,7 @@ class NullEvaluatingTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def _test_bulk_insert_novalue(self, attr, expected):
         Thing, AltNameThing = self.classes.Thing, self.classes.AltNameThing
 
-        s = Session()
+        s = fixture_session()
         s.bulk_insert_mappings(Thing, [{}])
         s.bulk_insert_mappings(AltNameThing, [{}])
         s.commit()
@@ -2935,9 +3064,119 @@ class NullEvaluatingTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def test_json_none_as_null(self):
         JSONThing = self.classes.JSONThing
 
-        s = Session()
+        s = fixture_session()
         f1 = JSONThing(data=None, data_null=None)
         s.add(f1)
         s.commit()
         eq_(s.query(cast(JSONThing.data, String)).scalar(), "null")
         eq_(s.query(cast(JSONThing.data_null, String)).scalar(), None)
+
+
+class EnsureCacheTest(fixtures.FutureEngineMixin, UOWTest):
+    def test_ensure_cache(self):
+        users, User = self.tables.users, self.classes.User
+
+        mapper(User, users)
+
+        cache = {}
+        eq_(len(inspect(User)._compiled_cache), 0)
+
+        with testing.db.connect().execution_options(
+            compiled_cache=cache
+        ) as conn:
+            s = Session(conn)
+            u1 = User(name="adf")
+            s.add(u1)
+            s.flush()
+
+            is_(conn._execution_options["compiled_cache"], cache)
+            eq_(len(inspect(User)._compiled_cache), 1)
+
+            u1.name = "newname"
+            s.flush()
+
+            is_(conn._execution_options["compiled_cache"], cache)
+            eq_(len(inspect(User)._compiled_cache), 2)
+
+            s.delete(u1)
+            s.flush()
+
+            is_(conn._execution_options["compiled_cache"], cache)
+            eq_(len(inspect(User)._compiled_cache), 3)
+
+
+class ORMOnlyPrimaryKeyTest(fixtures.TestBase):
+    @testing.requires.identity_columns
+    @testing.requires.returning
+    def test_a(self, base, run_test):
+        class A(base):
+            __tablename__ = "a"
+
+            id = Column(Integer, Identity())
+            included_col = Column(Integer)
+
+            __mapper_args__ = {"primary_key": [id], "eager_defaults": True}
+
+        run_test(A, A())
+
+    @testing.requires.sequences_as_server_defaults
+    @testing.requires.returning
+    def test_b(self, base, run_test):
+
+        seq = Sequence("x_seq")
+
+        class A(base):
+            __tablename__ = "a"
+
+            id = Column(Integer, seq, server_default=seq.next_value())
+            included_col = Column(Integer)
+
+            __mapper_args__ = {"primary_key": [id], "eager_defaults": True}
+
+        run_test(A, A())
+
+    def test_c(self, base, run_test):
+        class A(base):
+            __tablename__ = "a"
+
+            id = Column(Integer, nullable=False)
+            included_col = Column(Integer)
+
+            __mapper_args__ = {"primary_key": [id]}
+
+        a1 = A(id=1, included_col=select(1).scalar_subquery())
+        run_test(A, a1)
+
+    def test_d(self, base, run_test):
+        class A(base):
+            __tablename__ = "a"
+
+            id = Column(Integer, nullable=False)
+            updated_at = Column(DateTime, server_default=func.now())
+
+            __mapper_args__ = {"primary_key": [id], "eager_defaults": True}
+
+        a1 = A(id=1)
+        run_test(A, a1)
+
+    @testing.fixture
+    def base(self, metadata):
+        yield declarative_base(metadata=metadata)
+        clear_mappers()
+
+    @testing.fixture
+    def run_test(self, metadata, connection):
+        def go(A, a1):
+            metadata.create_all(connection)
+
+            with Session(connection) as s:
+                s.add(a1)
+
+                s.flush()
+                eq_(a1.id, 1)
+                s.commit()
+
+                aa = s.query(A).first()
+                is_(a1, aa)
+
+        return go

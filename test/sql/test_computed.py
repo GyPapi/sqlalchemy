@@ -11,7 +11,7 @@ from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import combinations
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 
 
 class DDLComputedTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -39,6 +39,20 @@ class DDLComputedTest(fixtures.TestBase, AssertsCompiledSQL):
             "ALWAYS AS (x + 2)%s)" % text,
         )
 
+    def test_other_options(self):
+        t = Table(
+            "t",
+            MetaData(),
+            Column(
+                "y", Integer, Computed("x + 2"), nullable=False, unique=True
+            ),
+        )
+        self.assert_compile(
+            CreateTable(t),
+            "CREATE TABLE t ("
+            "y INTEGER GENERATED ALWAYS AS (x + 2) NOT NULL, UNIQUE (y))",
+        )
+
     def test_server_default_onupdate(self):
         text = (
             "A generated column cannot specify a server_default or a "
@@ -57,7 +71,7 @@ class DDLComputedTest(fixtures.TestBase, AssertsCompiledSQL):
         assert_raises_message(ArgumentError, text, fn, server_default="42")
         assert_raises_message(ArgumentError, text, fn, server_onupdate="42")
 
-    def test_tometadata(self):
+    def test_to_metadata(self):
         comp1 = Computed("x + 2")
         m = MetaData()
         t = Table("t", m, Column("x", Integer), Column("y", Integer, comp1))
@@ -66,10 +80,10 @@ class DDLComputedTest(fixtures.TestBase, AssertsCompiledSQL):
         is_(t.c.y.server_default, comp1)
 
         m2 = MetaData()
-        t2 = t.tometadata(m2)
+        t2 = t.to_metadata(m2)
         comp2 = t2.c.y.server_default
 
-        is_not_(comp1, comp2)
+        is_not(comp1, comp2)
 
         is_(comp1.column, t.c.y)
         is_(t.c.y.server_onupdate, comp1)

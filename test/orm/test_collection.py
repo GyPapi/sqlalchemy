@@ -6,10 +6,10 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
+from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import util
 from sqlalchemy.orm import attributes
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import instrumentation
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
@@ -22,6 +22,7 @@ from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_false
 from sqlalchemy.testing import is_true
 from sqlalchemy.testing import ne_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -69,7 +70,18 @@ class Canary(object):
         return value
 
 
-class CollectionsTest(fixtures.ORMTest):
+class OrderedDictFixture(object):
+    @testing.fixture
+    def ordered_dict_mro(self):
+        if testing.requires.python37.enabled:
+            return type("ordered", (collections.MappedCollection,), {})
+        else:
+            return type(
+                "ordered", (util.OrderedDict, collections.MappedCollection), {}
+            )
+
+
+class CollectionsTest(OrderedDictFixture, fixtures.ORMTest):
     class Entity(object):
         def __init__(self, a=None, b=None, c=None):
             self.a = a
@@ -80,13 +92,12 @@ class CollectionsTest(fixtures.ORMTest):
             return str((id(self), self.a, self.b, self.c))
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         instrumentation.register_class(cls.Entity)
 
     @classmethod
-    def teardown_class(cls):
+    def teardown_test_class(cls):
         instrumentation.unregister_class(cls.Entity)
-        super(CollectionsTest, cls).teardown_class()
 
     _entity_id = 1
 
@@ -1287,8 +1298,8 @@ class CollectionsTest(fixtures.ORMTest):
         self._test_dict_bulk(MyEasyDict)
         self.assert_(getattr(MyEasyDict, "_sa_instrumented") == id(MyEasyDict))
 
-    def test_dict_subclass3(self):
-        class MyOrdered(util.OrderedDict, collections.MappedCollection):
+    def test_dict_subclass3(self, ordered_dict_mro):
+        class MyOrdered(ordered_dict_mro):
             def __init__(self):
                 collections.MappedCollection.__init__(self, lambda e: e.a)
                 util.OrderedDict.__init__(self)
@@ -1680,7 +1691,7 @@ class CollectionsTest(fixtures.ORMTest):
         self.assert_(e3 in canary.data)
 
 
-class DictHelpersTest(fixtures.MappedTest):
+class DictHelpersTest(OrderedDictFixture, fixtures.MappedTest):
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -1741,7 +1752,7 @@ class DictHelpersTest(fixtures.MappedTest):
         p = Parent()
         p.children["foo"] = Child("foo", "value")
         p.children["bar"] = Child("bar", "value")
-        session = create_session()
+        session = fixture_session()
         session.add(p)
         session.flush()
         pid = p.id
@@ -1827,7 +1838,7 @@ class DictHelpersTest(fixtures.MappedTest):
         p.children[("foo", "1")] = Child("foo", "1", "value 1")
         p.children[("foo", "2")] = Child("foo", "2", "value 2")
 
-        session = create_session()
+        session = fixture_session()
         session.add(p)
         session.flush()
         pid = p.id
@@ -1922,8 +1933,8 @@ class DictHelpersTest(fixtures.MappedTest):
         )
         self._test_composite_mapped(collection_class)
 
-    def test_mixin(self):
-        class Ordered(util.OrderedDict, collections.MappedCollection):
+    def test_mixin(self, ordered_dict_mro):
+        class Ordered(ordered_dict_mro):
             def __init__(self):
                 collections.MappedCollection.__init__(self, lambda v: v.a)
                 util.OrderedDict.__init__(self)
@@ -1931,8 +1942,8 @@ class DictHelpersTest(fixtures.MappedTest):
         collection_class = Ordered
         self._test_scalar_mapped(collection_class)
 
-    def test_mixin2(self):
-        class Ordered2(util.OrderedDict, collections.MappedCollection):
+    def test_mixin2(self, ordered_dict_mro):
+        class Ordered2(ordered_dict_mro):
             def __init__(self, keyfunc):
                 collections.MappedCollection.__init__(self, keyfunc)
                 util.OrderedDict.__init__(self)
@@ -1997,7 +2008,7 @@ class ColumnMappedWSerialize(fixtures.MappedTest):
     def test_selectable_column_mapped(self):
         from sqlalchemy import select
 
-        s = select([self.tables.foo]).alias()
+        s = select(self.tables.foo).alias()
         Foo = self.classes.Foo
         mapper(Foo, s)
         self._run_test([(Foo.b, Foo(b=5), 5), (s.c.b, Foo(b=5), 5)])
@@ -2092,7 +2103,7 @@ class CustomCollectionsTest(fixtures.MappedTest):
         f = Foo()
         f.bars.add(Bar())
         f.bars.add(Bar())
-        sess = create_session()
+        sess = fixture_session()
         sess.add(f)
         sess.flush()
         sess.expunge_all()
@@ -2135,7 +2146,7 @@ class CustomCollectionsTest(fixtures.MappedTest):
         f = Foo()
         f.bars.set(Bar())
         f.bars.set(Bar())
-        sess = create_session()
+        sess = fixture_session()
         sess.add(f)
         sess.flush()
         sess.expunge_all()
@@ -2177,7 +2188,7 @@ class CustomCollectionsTest(fixtures.MappedTest):
         col = collections.collection_adapter(f.bars)
         col.append_with_event(Bar("a"))
         col.append_with_event(Bar("b"))
-        sess = create_session()
+        sess = fixture_session()
         sess.add(f)
         sess.flush()
         sess.expunge_all()
@@ -2432,7 +2443,7 @@ class CustomCollectionsTest(fixtures.MappedTest):
         p1.children.append(o)
         assert control == list(p1.children)
 
-        sess = create_session()
+        sess = fixture_session()
         sess.add(p1)
         sess.flush()
         sess.expunge_all()

@@ -1,17 +1,18 @@
 # -*- encoding: utf-8
+
 from sqlalchemy import Column
-from sqlalchemy import engine_from_config
 from sqlalchemy import event
 from sqlalchemy import exc
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
-from sqlalchemy.dialects.mssql import adodbapi
 from sqlalchemy.dialects.mssql import base
 from sqlalchemy.dialects.mssql import pymssql
 from sqlalchemy.dialects.mssql import pyodbc
 from sqlalchemy.engine import url
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import assert_warnings
 from sqlalchemy.testing import engines
@@ -66,6 +67,13 @@ class ParseConnectTest(fixtures.TestBase):
             ],
             connection,
         )
+
+    def test_pyodbc_empty_url_no_warning(self):
+        dialect = pyodbc.dialect()
+        u = url.make_url("mssql+pyodbc://")
+
+        # no warning is emitted
+        dialect.create_connect_args(u)
 
     def test_pyodbc_host_no_driver(self):
         dialect = pyodbc.dialect()
@@ -148,6 +156,26 @@ class ParseConnectTest(fixtures.TestBase):
             True,
         )
 
+    def test_pyodbc_extra_connect_azure(self):
+        # issue #5592
+        dialect = pyodbc.dialect()
+        u = url.make_url(
+            "mssql+pyodbc://@server_name/db_name?"
+            "driver=ODBC+Driver+17+for+SQL+Server;"
+            "authentication=ActiveDirectoryIntegrated"
+        )
+        connection = dialect.create_connect_args(u)
+        eq_(connection[1], {})
+        eq_(
+            connection[0][0]
+            in (
+                "DRIVER={ODBC Driver 17 for SQL Server};"
+                "Server=server_name;Database=db_name;"
+                "Authentication=ActiveDirectoryIntegrated",
+            ),
+            True,
+        )
+
     def test_pyodbc_odbc_connect(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
@@ -201,7 +229,7 @@ class ParseConnectTest(fixtures.TestBase):
 
     def test_pyodbc_token_injection(self):
         token1 = "someuser%3BPORT%3D50001"
-        token2 = "somepw%3BPORT%3D50001"
+        token2 = "some{strange}pw%3BPORT%3D50001"
         token3 = "somehost%3BPORT%3D50001"
         token4 = "somedb%3BPORT%3D50001"
 
@@ -215,34 +243,8 @@ class ParseConnectTest(fixtures.TestBase):
             [
                 [
                     "DRIVER={foob};Server=somehost%3BPORT%3D50001;"
-                    "Database=somedb%3BPORT%3D50001;UID='someuser;PORT=50001';"
-                    "PWD='somepw;PORT=50001'"
-                ],
-                {},
-            ],
-            connection,
-        )
-
-    def test_adodbapi_token_injection(self):
-        token1 = "someuser%3BPORT%3D50001"
-        token2 = "somepw%3BPORT%3D50001"
-        token3 = "somehost%3BPORT%3D50001"
-        token4 = "someport%3BPORT%3D50001"
-
-        # this URL format is all wrong
-        u = url.make_url(
-            "mssql+adodbapi://@/?user=%s&password=%s&host=%s&port=%s"
-            % (token1, token2, token3, token4)
-        )
-        dialect = adodbapi.dialect()
-        connection = dialect.create_connect_args(u)
-        eq_(
-            [
-                [
-                    "Provider=SQLOLEDB;"
-                    "Data Source='somehost;PORT=50001', 'someport;PORT=50001';"
-                    "Initial Catalog=None;User Id='someuser;PORT=50001';"
-                    "Password='somepw;PORT=50001'"
+                    "Database=somedb%3BPORT%3D50001;UID={someuser;PORT=50001};"
+                    "PWD={some{strange}}pw;PORT=50001}"
                 ],
                 {},
             ],
@@ -314,7 +316,7 @@ class ParseConnectTest(fixtures.TestBase):
         )
 
         for error in [
-            MockDBAPIError("[%s] some pyodbc message" % code)
+            MockDBAPIError(code, "[%s] some pyodbc message" % code)
             for code in [
                 "08S01",
                 "01002",
@@ -336,7 +338,9 @@ class ParseConnectTest(fixtures.TestBase):
 
         eq_(
             dialect.is_disconnect(
-                MockProgrammingError("not an error"), None, None
+                MockProgrammingError("Query with abc08007def failed"),
+                None,
+                None,
             ),
             False,
         )
@@ -354,32 +358,19 @@ class ParseConnectTest(fixtures.TestBase):
         )
 
 
-class EngineFromConfigTest(fixtures.TestBase):
-    def test_legacy_schema_flag(self):
-        cfg = {
-            "sqlalchemy.url": "mssql://foodsn",
-            "sqlalchemy.legacy_schema_aliasing": "false",
-        }
-        e = engine_from_config(
-            cfg, module=Mock(version="MS SQL Server 11.0.92")
-        )
-        eq_(e.dialect.legacy_schema_aliasing, False)
-
-
 class FastExecutemanyTest(fixtures.TestBase):
     __only_on__ = "mssql"
     __backend__ = True
     __requires__ = ("pyodbc_fast_executemany",)
 
-    @testing.provide_metadata
-    def test_flag_on(self):
+    def test_flag_on(self, metadata):
         t = Table(
             "t",
-            self.metadata,
+            metadata,
             Column("id", Integer, primary_key=True),
             Column("data", String(50)),
         )
-        t.create()
+        t.create(testing.db)
 
         eng = engines.testing_engine(options={"fast_executemany": True})
 
@@ -390,7 +381,7 @@ class FastExecutemanyTest(fixtures.TestBase):
             if executemany:
                 assert cursor.fast_executemany
 
-        with eng.connect() as conn:
+        with eng.begin() as conn:
             conn.execute(
                 t.insert(),
                 [{"id": i, "data": "data_%d" % i} for i in range(100)],
@@ -400,7 +391,15 @@ class FastExecutemanyTest(fixtures.TestBase):
 
 
 class VersionDetectionTest(fixtures.TestBase):
-    def test_pymssql_version(self):
+    @testing.fixture
+    def mock_conn_scalar(self):
+        return lambda text: Mock(
+            exec_driver_sql=Mock(
+                return_value=Mock(scalar=Mock(return_value=text))
+            )
+        )
+
+    def test_pymssql_version(self, mock_conn_scalar):
         dialect = pymssql.MSDialect_pymssql()
 
         for vers in [
@@ -410,13 +409,13 @@ class VersionDetectionTest(fixtures.TestBase):
             "Microsoft SQL Azure (RTM) - 11.0.9216.62 \n"
             "Jul 18 2014 22:00:21 \nCopyright (c) Microsoft Corporation",
         ]:
-            conn = Mock(scalar=Mock(return_value=vers))
+            conn = mock_conn_scalar(vers)
             eq_(dialect._get_server_version_info(conn), (11, 0, 9216, 62))
 
-    def test_pyodbc_version_productversion(self):
+    def test_pyodbc_version_productversion(self, mock_conn_scalar):
         dialect = pyodbc.MSDialect_pyodbc()
 
-        conn = Mock(scalar=Mock(return_value="11.0.9216.62"))
+        conn = mock_conn_scalar("11.0.9216.62")
         eq_(dialect._get_server_version_info(conn), (11, 0, 9216, 62))
 
     def test_pyodbc_version_fallback(self):
@@ -429,8 +428,12 @@ class VersionDetectionTest(fixtures.TestBase):
             ("Not SQL Server Version 10.5", (5,)),
         ]:
             conn = Mock(
-                scalar=Mock(
-                    side_effect=exc.DBAPIError("stmt", "params", None)
+                exec_driver_sql=Mock(
+                    return_value=Mock(
+                        scalar=Mock(
+                            side_effect=exc.DBAPIError("stmt", "params", None)
+                        )
+                    )
                 ),
                 connection=Mock(getinfo=Mock(return_value=vers)),
             )
@@ -442,10 +445,9 @@ class RealIsolationLevelTest(fixtures.TestBase):
     __only_on__ = "mssql"
     __backend__ = True
 
-    @testing.provide_metadata
-    def test_isolation_level(self):
-        Table("test", self.metadata, Column("id", Integer)).create(
-            checkfirst=True
+    def test_isolation_level(self, metadata):
+        Table("test", metadata, Column("id", Integer)).create(
+            testing.db, checkfirst=True
         )
 
         with testing.db.connect() as c:
@@ -462,7 +464,7 @@ class RealIsolationLevelTest(fixtures.TestBase):
             with testing.db.connect() as c:
                 c.execution_options(isolation_level=value)
 
-                c.execute("SELECT TOP 10 * FROM test")
+                c.exec_driver_sql("SELECT TOP 10 * FROM test")
 
                 eq_(
                     testing.db.dialect.get_isolation_level(c.connection), value
@@ -483,7 +485,9 @@ class IsolationLevelDetectTest(fixtures.TestBase):
 
         result = []
 
-        def fail_on_exec(stmt,):
+        def fail_on_exec(
+            stmt,
+        ):
             if view is not None and view in stmt:
                 result.append(("SERIALIZABLE",))
             else:
@@ -519,3 +523,40 @@ class IsolationLevelDetectTest(fixtures.TestBase):
                 dialect.get_isolation_level,
                 connection,
             )
+
+
+class InvalidTransactionFalsePositiveTest(fixtures.TablesTest):
+    __only_on__ = "mssql"
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "error_t",
+            metadata,
+            Column("error_code", String(50), primary_key=True),
+        )
+
+    @classmethod
+    def insert_data(cls, connection):
+        connection.execute(
+            cls.tables.error_t.insert(),
+            [{"error_code": "01002"}],
+        )
+
+    def test_invalid_transaction_detection(self, connection):
+        # issue #5359
+        t = self.tables.error_t
+
+        # force duplicate PK error
+        assert_raises(
+            IntegrityError,
+            connection.execute,
+            t.insert(),
+            {"error_code": "01002"},
+        )
+
+        # this should not fail with
+        # "Can't reconnect until invalid transaction is rolled back."
+        result = connection.execute(t.select()).fetchall()
+        eq_(len(result), 1)

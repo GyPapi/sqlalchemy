@@ -1,5 +1,5 @@
 # postgresql/ext.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -12,6 +12,7 @@ from ...sql import elements
 from ...sql import expression
 from ...sql import functions
 from ...sql import roles
+from ...sql import schema
 from ...sql.schema import ColumnCollectionConstraint
 
 
@@ -22,7 +23,7 @@ class aggregate_order_by(expression.ColumnElement):
 
         from sqlalchemy.dialects.postgresql import aggregate_order_by
         expr = func.array_agg(aggregate_order_by(table.c.a, table.c.b.desc()))
-        stmt = select([expr])
+        stmt = select(expr)
 
     would represent the expression::
 
@@ -34,7 +35,7 @@ class aggregate_order_by(expression.ColumnElement):
             table.c.a,
             aggregate_order_by(literal_column("','"), table.c.a)
         )
-        stmt = select([expr])
+        stmt = select(expr)
 
     Would represent::
 
@@ -46,11 +47,13 @@ class aggregate_order_by(expression.ColumnElement):
 
     .. seealso::
 
-        :class:`.array_agg`
+        :class:`_functions.array_agg`
 
     """
 
     __visit_name__ = "aggregate_order_by"
+
+    stringify_dialect = "postgresql"
 
     def __init__(self, target, *order_by):
         self.target = coercions.expect(roles.ExpressionElementRole, target)
@@ -85,7 +88,7 @@ class aggregate_order_by(expression.ColumnElement):
 class ExcludeConstraint(ColumnCollectionConstraint):
     """A table-level EXCLUDE constraint.
 
-    Defines an EXCLUDE constraint as described in the `postgres
+    Defines an EXCLUDE constraint as described in the `PostgreSQL
     documentation`__.
 
     __ http://www.postgresql.org/docs/9.0/static/sql-createtable.html#SQL-CREATETABLE-EXCLUDE
@@ -95,6 +98,8 @@ class ExcludeConstraint(ColumnCollectionConstraint):
     __visit_name__ = "exclude_constraint"
 
     where = None
+
+    create_drop_stringify_dialect = "postgresql"
 
     @elements._document_text_coercion(
         "where",
@@ -110,10 +115,12 @@ class ExcludeConstraint(ColumnCollectionConstraint):
             const = ExcludeConstraint(
                 (Column('period'), '&&'),
                 (Column('group'), '='),
-                where=(Column('group') != 'some group')
+                where=(Column('group') != 'some group'),
+                ops={'group': 'my_operator_class'}
             )
 
-        The constraint is normally embedded into the :class:`.Table` construct
+        The constraint is normally embedded into the :class:`_schema.Table`
+        construct
         directly, or added later using :meth:`.append_constraint`::
 
             some_table = Table(
@@ -128,7 +135,8 @@ class ExcludeConstraint(ColumnCollectionConstraint):
                     (some_table.c.period, '&&'),
                     (some_table.c.group, '='),
                     where=some_table.c.group != 'some group',
-                    name='some_table_excl_const'
+                    name='some_table_excl_const',
+                    ops={'group': 'my_operator_class'}
                 )
             )
 
@@ -136,11 +144,14 @@ class ExcludeConstraint(ColumnCollectionConstraint):
 
           A sequence of two tuples of the form ``(column, operator)`` where
           "column" is a SQL expression element or a raw SQL string, most
-          typically a :class:`.Column` object, and "operator" is a string
+          typically a :class:`_schema.Column` object,
+          and "operator" is a string
           containing the operator to use.   In order to specify a column name
-          when a  :class:`.Column` object is not available, while ensuring
+          when a  :class:`_schema.Column` object is not available,
+          while ensuring
           that any necessary quoting rules take effect, an ad-hoc
-          :class:`.Column` or :func:`.sql.expression.column` object should be
+          :class:`_schema.Column` or :func:`_expression.column`
+          object should be
           used.
 
         :param name:
@@ -162,6 +173,19 @@ class ExcludeConstraint(ColumnCollectionConstraint):
           Optional SQL expression construct or literal SQL string.
           If set, emit WHERE <predicate> when issuing DDL
           for this constraint.
+
+        :param ops:
+          Optional dictionary.  Used to define operator classes for the
+          elements; works the same way as that of the
+          :ref:`postgresql_ops <postgresql_operator_classes>`
+          parameter specified to the :class:`_schema.Index` construct.
+
+          .. versionadded:: 1.3.21
+
+          .. seealso::
+
+            :ref:`postgresql_operator_classes` - general description of how
+            PostgreSQL operator classes are specified.
 
         """
         columns = []
@@ -201,7 +225,9 @@ class ExcludeConstraint(ColumnCollectionConstraint):
         if where is not None:
             self.where = coercions.expect(roles.StatementOptionRole, where)
 
-    def _set_parent(self, table):
+        self.ops = kw.get("ops", {})
+
+    def _set_parent(self, table, **kw):
         super(ExcludeConstraint, self)._set_parent(table)
 
         self._render_exprs = [
@@ -215,8 +241,14 @@ class ExcludeConstraint(ColumnCollectionConstraint):
             )
         ]
 
-    def copy(self, **kw):
-        elements = [(col, self.operators[col]) for col in self.columns.keys()]
+    def copy(self, target_table=None, **kw):
+        elements = [
+            (
+                schema._copy_expression(expr, self.parent, target_table),
+                self.operators[expr.name],
+            )
+            for expr in self.columns
+        ]
         c = self.__class__(
             *elements,
             name=self.name,
@@ -230,9 +262,9 @@ class ExcludeConstraint(ColumnCollectionConstraint):
 
 
 def array_agg(*arg, **kw):
-    """PostgreSQL-specific form of :class:`.array_agg`, ensures
-    return type is :class:`.postgresql.ARRAY` and not
-    the plain :class:`.types.ARRAY`, unless an explicit ``type_``
+    """PostgreSQL-specific form of :class:`_functions.array_agg`, ensures
+    return type is :class:`_postgresql.ARRAY` and not
+    the plain :class:`_types.ARRAY`, unless an explicit ``type_``
     is passed.
 
     .. versionadded:: 1.1

@@ -30,6 +30,13 @@ Associations
 
 .. automodule:: examples.association
 
+.. _examples_asyncio:
+
+Asyncio Integration
+-------------------
+
+.. automodule:: examples.asyncio
+
 Directed Graphs
 ---------------
 
@@ -90,6 +97,8 @@ XML Persistence
 
 .. automodule:: examples.elementtree
 
+.. _examples_versioning:
+
 Versioning Objects
 ------------------
 
@@ -144,6 +153,13 @@ Horizontal Sharding
 
 Extending the ORM
 =================
+
+.. _examples_session_orm_events:
+
+ORM Query Events
+-----------------
+
+.. automodule:: examples.extending_query
 
 .. _examples_caching:
 

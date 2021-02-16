@@ -6,26 +6,26 @@ from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm import attributes
 from sqlalchemy.orm import class_mapper
 from sqlalchemy.orm import column_property
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import defaultload
 from sqlalchemy.orm import defer
 from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import lazyload
 from sqlalchemy.orm import Load
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
 from sqlalchemy.orm import strategy_options
 from sqlalchemy.orm import subqueryload
+from sqlalchemy.orm import synonym
 from sqlalchemy.orm import util as orm_util
 from sqlalchemy.orm import with_polymorphic
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertions import assert_raises_message
 from sqlalchemy.testing.assertions import eq_
+from sqlalchemy.testing.fixtures import fixture_session
 from test.orm import _fixtures
 from .inheritance._poly_fixtures import _Polymorphic
 from .inheritance._poly_fixtures import Company
@@ -59,6 +59,13 @@ class QueryTest(_fixtures.FixtureTest):
             },
         )
 
+        class OrderWProp(cls.classes.Order):
+            @property
+            def some_attr(self):
+                return "hi"
+
+        mapper(OrderWProp, None, inherits=cls.classes.Order)
+
 
 class PathTest(object):
     def _make_path(self, path):
@@ -77,20 +84,23 @@ class PathTest(object):
         return orm_util.PathRegistry.coerce(self._make_path(path))
 
     def _assert_path_result(self, opt, q, paths):
-        q._attributes = q._attributes.copy()
         attr = {}
 
         if isinstance(opt, strategy_options._UnboundLoad):
             for val in opt._to_bind:
                 val._bind_loader(
-                    [ent.entity_zero for ent in q._mapper_entities],
-                    q._current_path,
+                    [
+                        ent.entity_zero
+                        for ent in q._compile_state()._mapper_entities
+                    ],
+                    q._compile_options._current_path,
                     attr,
                     False,
                 )
         else:
-            opt._process(q, True)
-            attr = q._attributes
+            compile_state = q._compile_state()
+            compile_state.attributes = attr = {}
+            opt._process(compile_state, True)
 
         assert_paths = [k[1] for k in attr]
         eq_(
@@ -191,6 +201,20 @@ class LoadTest(PathTest, QueryTest):
             "relationship",
         )
 
+    def test_gen_path_attr_str_not_mapped(self):
+        OrderWProp = self.classes.OrderWProp
+
+        sess = fixture_session()
+        q = sess.query(OrderWProp).options(defer("some_attr"))
+
+        assert_raises_message(
+            sa.exc.ArgumentError,
+            r"Expected attribute \"some_attr\" on mapped class "
+            "OrderWProp->orders to be a mapped attribute; instead "
+            "got .*property.* object.",
+            q._compile_state,
+        )
+
     def test_gen_path_attr_entity_invalid_noraiseerr(self):
         User = self.classes.User
         Order = self.classes.Order
@@ -213,7 +237,7 @@ class LoadTest(PathTest, QueryTest):
 
         l1 = Load(User)
         l2 = l1.joinedload("addresses")
-        to_bind = l2.context.values()[0]
+        to_bind = list(l2.context.values())[0]
         eq_(
             l1.context,
             {("loader", self._make_path([User, "addresses"])): to_bind},
@@ -242,7 +266,7 @@ class OfTypePathingTest(PathTest, QueryTest):
             inherits=Address,
             properties={
                 "sub_attr": column_property(address_table.c.email_address),
-                "dings": relationship(Dingaling),
+                "dings": relationship(Dingaling, viewonly=True),
             },
         )
 
@@ -255,7 +279,7 @@ class OfTypePathingTest(PathTest, QueryTest):
             SubAddr.sub_attr
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1,
@@ -272,7 +296,7 @@ class OfTypePathingTest(PathTest, QueryTest):
             .defer(SubAddr.sub_attr)
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1,
@@ -285,7 +309,7 @@ class OfTypePathingTest(PathTest, QueryTest):
 
         l1 = defaultload(User.addresses.of_type(SubAddr)).defer("sub_attr")
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1,
@@ -302,7 +326,7 @@ class OfTypePathingTest(PathTest, QueryTest):
             .defer("sub_attr")
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1,
@@ -317,7 +341,7 @@ class OfTypePathingTest(PathTest, QueryTest):
             SubAddr.dings
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1, q, [(User, "addresses"), (User, "addresses", SubAddr, "dings")]
@@ -332,7 +356,7 @@ class OfTypePathingTest(PathTest, QueryTest):
             .joinedload(SubAddr.dings)
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1, q, [(User, "addresses"), (User, "addresses", SubAddr, "dings")]
@@ -343,7 +367,7 @@ class OfTypePathingTest(PathTest, QueryTest):
 
         l1 = defaultload(User.addresses.of_type(SubAddr)).joinedload("dings")
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1, q, [(User, "addresses"), (User, "addresses", SubAddr, "dings")]
@@ -358,7 +382,7 @@ class OfTypePathingTest(PathTest, QueryTest):
             .defer("sub_attr")
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         self._assert_path_result(
             l1,
@@ -376,7 +400,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_get_path_one_level_string(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
 
         opt = self._option_fixture("addresses")
@@ -385,7 +409,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_get_path_one_level_attribute(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
 
         opt = self._option_fixture(User.addresses)
@@ -397,7 +421,7 @@ class OptionsTest(PathTest, QueryTest):
         # ensure "current path" is fully consumed before
         # matching against current entities.
         # see [ticket:2098]
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         opt = self._option_fixture("email_address", "id")
         q = sess.query(Address)._with_current_path(
@@ -410,7 +434,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_get_path_one_level_with_unrelated(self):
         Order = self.classes.Order
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Order)
         opt = self._option_fixture("addresses")
         self._assert_path_result(opt, q, [])
@@ -422,7 +446,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Order,
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
 
         opt = self._option_fixture("orders.items.keywords")
@@ -443,7 +467,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Order,
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
 
         opt = self._option_fixture(User.orders, Order.items, Item.keywords)
@@ -464,7 +488,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Order,
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item)._with_current_path(
             self._make_path_registry([User, "orders", Order, "items"])
         )
@@ -479,7 +503,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Order,
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item)._with_current_path(
             self._make_path_registry([User, "orders", Order, "items"])
         )
@@ -494,7 +518,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Order,
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item)._with_current_path(
             self._make_path_registry([User, "orders", Order, "items"])
         )
@@ -512,7 +536,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Order,
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item)._with_current_path(
             self._make_path_registry([User, "orders", Order, "items"])
         )
@@ -530,7 +554,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Order,
         )
 
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item)._with_current_path(
             self._make_path_registry(
                 [inspect(aliased(User)), "orders", Order, "items"]
@@ -563,7 +587,7 @@ class OptionsTest(PathTest, QueryTest):
         )
 
         ac = aliased(User)
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item)._with_current_path(
             self._make_path_registry([inspect(ac), "orders", Order, "items"])
         )
@@ -577,7 +601,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_from_base_to_subclass_attr(self):
         Dingaling, Address = self.classes.Dingaling, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
 
         class SubAddr(Address):
             pass
@@ -585,7 +609,7 @@ class OptionsTest(PathTest, QueryTest):
         mapper(
             SubAddr,
             inherits=Address,
-            properties={"flub": relationship(Dingaling)},
+            properties={"flub": relationship(Dingaling, viewonly=True)},
         )
 
         q = sess.query(Address)
@@ -596,7 +620,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_from_subclass_to_subclass_attr(self):
         Dingaling, Address = self.classes.Dingaling, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
 
         class SubAddr(Address):
             pass
@@ -604,7 +628,7 @@ class OptionsTest(PathTest, QueryTest):
         mapper(
             SubAddr,
             inherits=Address,
-            properties={"flub": relationship(Dingaling)},
+            properties={"flub": relationship(Dingaling, viewonly=True)},
         )
 
         q = sess.query(SubAddr)
@@ -615,7 +639,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_from_base_to_base_attr_via_subclass(self):
         Dingaling, Address = self.classes.Dingaling, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
 
         class SubAddr(Address):
             pass
@@ -623,7 +647,7 @@ class OptionsTest(PathTest, QueryTest):
         mapper(
             SubAddr,
             inherits=Address,
-            properties={"flub": relationship(Dingaling)},
+            properties={"flub": relationship(Dingaling, viewonly=True)},
         )
 
         q = sess.query(Address)
@@ -636,7 +660,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_of_type(self):
         User, Address = self.classes.User, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
 
         class SubAddr(Address):
             pass
@@ -667,7 +691,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_of_type_string_attr(self):
         User, Address = self.classes.User, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
 
         class SubAddr(Address):
             pass
@@ -700,7 +724,7 @@ class OptionsTest(PathTest, QueryTest):
             self.classes.Address,
         )
 
-        sess = Session()
+        sess = fixture_session()
 
         class SubAddr(Address):
             pass
@@ -708,7 +732,7 @@ class OptionsTest(PathTest, QueryTest):
         mapper(
             SubAddr,
             inherits=Address,
-            properties={"flub": relationship(Dingaling)},
+            properties={"flub": relationship(Dingaling, viewonly=True)},
         )
 
         q = sess.query(User)
@@ -735,7 +759,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_aliased_single(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         ualias = aliased(User)
         q = sess.query(ualias)
         opt = self._option_fixture(ualias.addresses)
@@ -744,7 +768,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_with_current_aliased_single(self):
         User, Address = self.classes.User, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
         ualias = aliased(User)
         q = sess.query(ualias)._with_current_path(
             self._make_path_registry([Address, "user"])
@@ -755,7 +779,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_with_current_aliased_single_nonmatching_option(self):
         User, Address = self.classes.User, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
         ualias = aliased(User)
         q = sess.query(User)._with_current_path(
             self._make_path_registry([Address, "user"])
@@ -766,7 +790,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_with_current_aliased_single_nonmatching_entity(self):
         User, Address = self.classes.User, self.classes.Address
 
-        sess = Session()
+        sess = fixture_session()
         ualias = aliased(User)
         q = sess.query(ualias)._with_current_path(
             self._make_path_registry([Address, "user"])
@@ -778,7 +802,7 @@ class OptionsTest(PathTest, QueryTest):
         Item = self.classes.Item
         Order = self.classes.Order
         opt = self._option_fixture(Order.items)
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item, Order)
         self._assert_path_result(opt, q, [(Order, "items")])
 
@@ -786,7 +810,7 @@ class OptionsTest(PathTest, QueryTest):
         Item = self.classes.Item
         Order = self.classes.Order
         opt = self._option_fixture("items")
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item, Order)
         self._assert_path_result(opt, q, [])
 
@@ -794,7 +818,7 @@ class OptionsTest(PathTest, QueryTest):
         Item = self.classes.Item
         Order = self.classes.Order
         opt = self._option_fixture("items")
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item.id, Order.id)
         self._assert_path_result(opt, q, [])
 
@@ -803,7 +827,7 @@ class OptionsTest(PathTest, QueryTest):
         Item = self.classes.Item
         Order = self.classes.Order
         opt = self._option_fixture(User.orders)
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(Item)._with_current_path(
             self._make_path_registry([User, "orders", Order, "items"])
         )
@@ -812,7 +836,7 @@ class OptionsTest(PathTest, QueryTest):
     def test_chained(self):
         User = self.classes.User
         Order = self.classes.Order
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         opt = self._option_fixture(User.orders).joinedload("items")
         self._assert_path_result(
@@ -823,7 +847,7 @@ class OptionsTest(PathTest, QueryTest):
         User = self.classes.User
         Order = self.classes.Order
         Item = self.classes.Item
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         opt = self._option_fixture("orders.items").joinedload("keywords")
         self._assert_path_result(
@@ -840,7 +864,7 @@ class OptionsTest(PathTest, QueryTest):
         User = self.classes.User
         Order = self.classes.Order
         Item = self.classes.Item
-        sess = Session()
+        sess = fixture_session()
         q = sess.query(User)
         opt = self._option_fixture(User.orders, Order.items).joinedload(
             "keywords"
@@ -893,7 +917,7 @@ class FromSubclassOptionsTest(PathTest, fixtures.DeclarativeMappedTest):
         BaseCls, SubClass, Related, SubRelated = self.classes(
             "BaseCls", "SubClass", "Related", "SubRelated"
         )
-        sess = Session()
+        sess = fixture_session()
 
         q = sess.query(Related)._with_current_path(
             self._make_path_registry([inspect(SubClass), "related"])
@@ -1139,12 +1163,21 @@ class OptionsNoPropTest(_fixtures.FixtureTest):
             'column property "Keyword.keywords"',
         )
 
-    def test_wrong_type_in_option(self):
+    def test_wrong_type_in_option_cls(self):
         Item = self.classes.Item
         Keyword = self.classes.Keyword
         self._assert_eager_with_entity_exception(
             [Item],
             (joinedload(Keyword),),
+            r"mapper option expects string key or list of attributes",
+        )
+
+    def test_wrong_type_in_option_descriptor(self):
+        OrderWProp = self.classes.OrderWProp
+
+        self._assert_eager_with_entity_exception(
+            [OrderWProp],
+            (joinedload(OrderWProp.some_attr),),
             r"mapper option expects string key or list of attributes",
         )
 
@@ -1213,19 +1246,33 @@ class OptionsNoPropTest(_fixtures.FixtureTest):
             ),
         )
 
+        class OrderWProp(cls.classes.Order):
+            @property
+            def some_attr(self):
+                return "hi"
+
+        mapper(OrderWProp, None, inherits=cls.classes.Order)
+
     def _assert_option(self, entity_list, option):
         Item = self.classes.Item
 
-        q = create_session().query(*entity_list).options(joinedload(option))
+        context = (
+            fixture_session()
+            .query(*entity_list)
+            .options(joinedload(option))
+            ._compile_state()
+        )
         key = ("loader", (inspect(Item), inspect(Item).attrs.keywords))
-        assert key in q._attributes
+        assert key in context.attributes
 
     def _assert_loader_strategy_exception(self, entity_list, options, message):
         assert_raises_message(
             orm_exc.LoaderStrategyException,
             message,
-            create_session().query(*entity_list).options,
-            *options
+            fixture_session()
+            .query(*entity_list)
+            .options(*options)
+            ._compile_state,
         )
 
     def _assert_eager_with_entity_exception(
@@ -1234,8 +1281,10 @@ class OptionsNoPropTest(_fixtures.FixtureTest):
         assert_raises_message(
             sa.exc.ArgumentError,
             message,
-            create_session().query(*entity_list).options,
-            *options
+            fixture_session()
+            .query(*entity_list)
+            .options(*options)
+            ._compile_state,
         )
 
     def _assert_eager_with_just_column_exception(
@@ -1244,14 +1293,16 @@ class OptionsNoPropTest(_fixtures.FixtureTest):
         assert_raises_message(
             sa.exc.ArgumentError,
             message,
-            create_session().query(column).options,
-            joinedload(eager_option),
+            fixture_session()
+            .query(column)
+            .options(joinedload(eager_option))
+            ._compile_state,
         )
 
 
 class OptionsNoPropTestInh(_Polymorphic):
     def test_missing_attr_wpoly_subclasss(self):
-        s = Session()
+        s = fixture_session()
 
         wp = with_polymorphic(Person, [Manager], flat=True)
 
@@ -1260,25 +1311,27 @@ class OptionsNoPropTestInh(_Polymorphic):
             r'Mapped attribute "Manager.status" does not apply to any of '
             r"the root entities in this query, e.g. "
             r"with_polymorphic\(Person, \[Manager\]\).",
-            s.query(wp).options,
-            load_only(Manager.status),
+            s.query(wp).options(load_only(Manager.status))._compile_state,
         )
 
     def test_missing_attr_of_type_subclass(self):
-        s = Session()
+        s = fixture_session()
 
         assert_raises_message(
             sa.exc.ArgumentError,
             r'Attribute "Manager.manager_name" does not link from element '
             r'"with_polymorphic\(Person, \[Engineer\]\)".$',
-            s.query(Company).options,
-            joinedload(Company.employees.of_type(Engineer)).load_only(
-                Manager.manager_name
-            ),
+            s.query(Company)
+            .options(
+                joinedload(Company.employees.of_type(Engineer)).load_only(
+                    Manager.manager_name
+                )
+            )
+            ._compile_state,
         )
 
     def test_missing_attr_of_type_subclass_name_matches(self):
-        s = Session()
+        s = fixture_session()
 
         # the name "status" is present on Engineer also, make sure
         # that doesn't get mixed up here
@@ -1286,27 +1339,33 @@ class OptionsNoPropTestInh(_Polymorphic):
             sa.exc.ArgumentError,
             r'Attribute "Manager.status" does not link from element '
             r'"with_polymorphic\(Person, \[Engineer\]\)".$',
-            s.query(Company).options,
-            joinedload(Company.employees.of_type(Engineer)).load_only(
-                Manager.status
-            ),
+            s.query(Company)
+            .options(
+                joinedload(Company.employees.of_type(Engineer)).load_only(
+                    Manager.status
+                )
+            )
+            ._compile_state,
         )
 
     def test_missing_str_attr_of_type_subclass(self):
-        s = Session()
+        s = fixture_session()
 
         assert_raises_message(
             sa.exc.ArgumentError,
             r'Can\'t find property named "manager_name" on '
             r"mapped class Engineer->engineers in this Query.$",
-            s.query(Company).options,
-            joinedload(Company.employees.of_type(Engineer)).load_only(
-                "manager_name"
-            ),
+            s.query(Company)
+            .options(
+                joinedload(Company.employees.of_type(Engineer)).load_only(
+                    "manager_name"
+                )
+            )
+            ._compile_state,
         )
 
     def test_missing_attr_of_type_wpoly_subclass(self):
-        s = Session()
+        s = fixture_session()
 
         wp = with_polymorphic(Person, [Manager], flat=True)
 
@@ -1314,14 +1373,17 @@ class OptionsNoPropTestInh(_Polymorphic):
             sa.exc.ArgumentError,
             r'Attribute "Manager.manager_name" does not link from '
             r'element "with_polymorphic\(Person, \[Manager\]\)".$',
-            s.query(Company).options,
-            joinedload(Company.employees.of_type(wp)).load_only(
-                Manager.manager_name
-            ),
+            s.query(Company)
+            .options(
+                joinedload(Company.employees.of_type(wp)).load_only(
+                    Manager.manager_name
+                )
+            )
+            ._compile_state,
         )
 
     def test_missing_attr_is_missing_of_type_for_alias(self):
-        s = Session()
+        s = fixture_session()
 
         pa = aliased(Person)
 
@@ -1330,8 +1392,9 @@ class OptionsNoPropTestInh(_Polymorphic):
             r'Attribute "AliasedClass_Person.name" does not link from '
             r'element "mapped class Person->people".  Did you mean to use '
             r"Company.employees.of_type\(AliasedClass_Person\)\?",
-            s.query(Company).options,
-            joinedload(Company.employees).load_only(pa.name),
+            s.query(Company)
+            .options(joinedload(Company.employees).load_only(pa.name))
+            ._compile_state,
         )
 
         q = s.query(Company).options(
@@ -1341,7 +1404,7 @@ class OptionsNoPropTestInh(_Polymorphic):
             Company.employees.property
         ][inspect(pa)][pa.name.property]
         key = ("loader", orig_path.natural_path)
-        loader = q._attributes[key]
+        loader = q._compile_state().attributes[key]
         eq_(loader.path, orig_path)
 
 
@@ -1366,6 +1429,7 @@ class PickleTest(PathTest, QueryTest):
                 "propagate_to_loaders": True,
                 "_of_type": None,
                 "_to_bind": to_bind,
+                "_extra_criteria": (),
             },
         )
 
@@ -1400,11 +1464,14 @@ class PickleTest(PathTest, QueryTest):
 
         opt.__setstate__(state)
 
-        query = create_session().query(User)
+        query = fixture_session().query(User)
         attr = {}
         load = opt._bind_loader(
-            [ent.entity_zero for ent in query._mapper_entities],
-            query._current_path,
+            [
+                ent.entity_zero
+                for ent in query._compile_state()._mapper_entities
+            ],
+            query._compile_options._current_path,
             attr,
             False,
         )
@@ -1434,11 +1501,14 @@ class PickleTest(PathTest, QueryTest):
 
         opt.__setstate__(state)
 
-        query = create_session().query(User)
+        query = fixture_session().query(User)
         attr = {}
         load = opt._bind_loader(
-            [ent.entity_zero for ent in query._mapper_entities],
-            query._current_path,
+            [
+                ent.entity_zero
+                for ent in query._compile_state()._mapper_entities
+            ],
+            query._compile_options._current_path,
             attr,
             False,
         )
@@ -1453,9 +1523,7 @@ class PickleTest(PathTest, QueryTest):
 
 class LocalOptsTest(PathTest, QueryTest):
     @classmethod
-    def setup_class(cls):
-        super(LocalOptsTest, cls).setup_class()
-
+    def setup_test_class(cls):
         @strategy_options.loader_option()
         def some_col_opt_only(loadopt, key, opts):
             return loadopt.set_column_strategy(
@@ -1474,15 +1542,16 @@ class LocalOptsTest(PathTest, QueryTest):
     def _assert_attrs(self, opts, expected):
         User = self.classes.User
 
-        query = create_session().query(User)
+        query = fixture_session().query(User)
         attr = {}
 
         for opt in opts:
             if isinstance(opt, strategy_options._UnboundLoad):
+                ctx = query._compile_state()
                 for tb in opt._to_bind:
                     tb._bind_loader(
-                        [ent.entity_zero for ent in query._mapper_entities],
-                        query._current_path,
+                        [ent.entity_zero for ent in ctx._mapper_entities],
+                        query._compile_options._current_path,
                         attr,
                         False,
                     )
@@ -1568,27 +1637,29 @@ class SubOptionsTest(PathTest, QueryTest):
     run_deletes = None
 
     def _assert_opts(self, q, sub_opt, non_sub_opts):
-        existing_attributes = q._attributes
-        q._attributes = q._attributes.copy()
         attr_a = {}
 
         for val in sub_opt._to_bind:
             val._bind_loader(
-                [ent.entity_zero for ent in q._mapper_entities],
-                q._current_path,
+                [
+                    ent.entity_zero
+                    for ent in q._compile_state()._mapper_entities
+                ],
+                q._compile_options._current_path,
                 attr_a,
                 False,
             )
-
-        q._attributes = existing_attributes.copy()
 
         attr_b = {}
 
         for opt in non_sub_opts:
             for val in opt._to_bind:
                 val._bind_loader(
-                    [ent.entity_zero for ent in q._mapper_entities],
-                    q._current_path,
+                    [
+                        ent.entity_zero
+                        for ent in q._compile_state()._mapper_entities
+                    ],
+                    q._compile_options._current_path,
                     attr_b,
                     False,
                 )
@@ -1628,7 +1699,7 @@ class SubOptionsTest(PathTest, QueryTest):
             defaultload(User.orders).defer(Order.description),
         ]
 
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_two(self):
@@ -1647,7 +1718,7 @@ class SubOptionsTest(PathTest, QueryTest):
             defaultload(User.orders).defer(Order.description),
         ]
 
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_three(self):
@@ -1656,7 +1727,7 @@ class SubOptionsTest(PathTest, QueryTest):
         )
         sub_opt = defaultload(User.orders).options(defer("*"))
         non_sub_opts = [defaultload(User.orders).defer("*")]
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_four(self):
@@ -1685,7 +1756,7 @@ class SubOptionsTest(PathTest, QueryTest):
             .defaultload(Item.keywords)
             .defer(Keyword.name),
         ]
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_four_strings(self):
@@ -1714,7 +1785,7 @@ class SubOptionsTest(PathTest, QueryTest):
             .defaultload(Item.keywords)
             .defer(Keyword.name),
         ]
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_five(self):
@@ -1726,7 +1797,7 @@ class SubOptionsTest(PathTest, QueryTest):
             joinedload(User.orders),
             defaultload(User.orders).load_only(Order.description),
         ]
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_five_strings(self):
@@ -1738,7 +1809,7 @@ class SubOptionsTest(PathTest, QueryTest):
             joinedload(User.orders),
             defaultload(User.orders).load_only(Order.description),
         ]
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_invalid_one(self):
@@ -1758,7 +1829,7 @@ class SubOptionsTest(PathTest, QueryTest):
             joinedload(User.orders).joinedload(Item.keywords),
             defaultload(User.orders).joinedload(Order.items),
         ]
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_invalid_two(self):
@@ -1778,7 +1849,7 @@ class SubOptionsTest(PathTest, QueryTest):
             joinedload(User.orders).joinedload(Item.keywords),
             defaultload(User.orders).joinedload(Order.items),
         ]
-        sess = Session()
+        sess = fixture_session()
         self._assert_opts(sess.query(User), sub_opt, non_sub_opts)
 
     def test_not_implemented_fromload(self):
@@ -1808,800 +1879,349 @@ class SubOptionsTest(PathTest, QueryTest):
         )
 
 
-class PathedCacheKeyTest(PathTest, QueryTest):
-
-    run_create_tables = False
-    run_inserts = None
-    run_deletes = None
-
-    def test_unbound_cache_key_included_safe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+class MapperOptionsTest(_fixtures.FixtureTest):
+    def test_synonym_options(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
         )
 
-        query_path = self._make_path_registry([User, "orders"])
-
-        opt = joinedload(User.orders).joinedload(Order.items)
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (((Order, "items", Item, ("lazy", "joined")),)),
-        )
-
-    def test_unbound_cache_key_included_safe_multipath(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        base = joinedload(User.orders)
-        opt1 = base.joinedload(Order.items)
-        opt2 = base.joinedload(Order.address)
-
-        eq_(
-            opt1._generate_path_cache_key(query_path),
-            (((Order, "items", Item, ("lazy", "joined")),)),
-        )
-
-        eq_(
-            opt2._generate_path_cache_key(query_path),
-            (((Order, "address", Address, ("lazy", "joined")),)),
-        )
-
-    def test_bound_cache_key_included_safe_multipath(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        base = Load(User).joinedload(User.orders)
-        opt1 = base.joinedload(Order.items)
-        opt2 = base.joinedload(Order.address)
-
-        eq_(
-            opt1._generate_path_cache_key(query_path),
-            (((Order, "items", Item, ("lazy", "joined")),)),
-        )
-
-        eq_(
-            opt2._generate_path_cache_key(query_path),
-            (((Order, "address", Address, ("lazy", "joined")),)),
-        )
-
-    def test_bound_cache_key_included_safe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        opt = Load(User).joinedload(User.orders).joinedload(Order.items)
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (((Order, "items", Item, ("lazy", "joined")),)),
-        )
-
-    def test_unbound_cache_key_excluded_on_other(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = joinedload(User.orders).joinedload(Order.items)
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_bound_cache_key_excluded_on_other(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = Load(User).joinedload(User.orders).joinedload(Order.items)
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_unbound_cache_key_excluded_on_aliased(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        # query of:
-        #
-        # query(User).options(
-        #       joinedload(aliased(User).orders).joinedload(Order.items))
-        #
-        # we are lazy loading Order objects from User.orders
-        # the path excludes our option so cache key should
-        # be None
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        opt = joinedload(aliased(User).orders).joinedload(Order.items)
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_bound_cache_key_wildcard_one(self):
-        # do not change this test, it is testing
-        # a specific condition in Load._chop_path().
-        User, Address = self.classes("User", "Address")
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = Load(User).lazyload("*")
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_unbound_cache_key_wildcard_one(self):
-        User, Address = self.classes("User", "Address")
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = lazyload("*")
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (("relationship:_sa_default", ("lazy", "select")),),
-        )
-
-    def test_bound_cache_key_wildcard_two(self):
-        User, Address, Order, Item, SubItem, Keyword = self.classes(
-            "User", "Address", "Order", "Item", "SubItem", "Keyword"
-        )
-
-        query_path = self._make_path_registry([User])
-
-        opt = Load(User).lazyload("orders").lazyload("*")
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                ("orders", Order, ("lazy", "select")),
-                ("orders", Order, "relationship:*", ("lazy", "select")),
-            ),
-        )
-
-    def test_unbound_cache_key_wildcard_two(self):
-        User, Address, Order, Item, SubItem, Keyword = self.classes(
-            "User", "Address", "Order", "Item", "SubItem", "Keyword"
-        )
-
-        query_path = self._make_path_registry([User])
-
-        opt = lazyload("orders").lazyload("*")
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                ("orders", Order, ("lazy", "select")),
-                ("orders", Order, "relationship:*", ("lazy", "select")),
-            ),
-        )
-
-    def test_unbound_cache_key_of_type_subclass_relationship(self):
-        User, Address, Order, Item, SubItem, Keyword = self.classes(
-            "User", "Address", "Order", "Item", "SubItem", "Keyword"
-        )
-
-        query_path = self._make_path_registry([Order, "items", Item])
-
-        opt = subqueryload(Order.items.of_type(SubItem)).subqueryload(
-            SubItem.extra_keywords
-        )
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (SubItem, ("lazy", "subquery")),
-                ("extra_keywords", Keyword, ("lazy", "subquery")),
-            ),
-        )
-
-    def test_unbound_cache_key_of_type_subclass_relationship_stringattr(self):
-        User, Address, Order, Item, SubItem, Keyword = self.classes(
-            "User", "Address", "Order", "Item", "SubItem", "Keyword"
-        )
-
-        query_path = self._make_path_registry([Order, "items", Item])
-
-        opt = subqueryload(Order.items.of_type(SubItem)).subqueryload(
-            "extra_keywords"
-        )
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (SubItem, ("lazy", "subquery")),
-                ("extra_keywords", Keyword, ("lazy", "subquery")),
-            ),
-        )
-
-    def test_bound_cache_key_of_type_subclass_relationship(self):
-        User, Address, Order, Item, SubItem, Keyword = self.classes(
-            "User", "Address", "Order", "Item", "SubItem", "Keyword"
-        )
-
-        query_path = self._make_path_registry([Order, "items", Item])
-
-        opt = (
-            Load(Order)
-            .subqueryload(Order.items.of_type(SubItem))
-            .subqueryload(SubItem.extra_keywords)
-        )
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (SubItem, ("lazy", "subquery")),
-                ("extra_keywords", Keyword, ("lazy", "subquery")),
-            ),
-        )
-
-    def test_bound_cache_key_of_type_subclass_string_relationship(self):
-        User, Address, Order, Item, SubItem, Keyword = self.classes(
-            "User", "Address", "Order", "Item", "SubItem", "Keyword"
-        )
-
-        query_path = self._make_path_registry([Order, "items", Item])
-
-        opt = (
-            Load(Order)
-            .subqueryload(Order.items.of_type(SubItem))
-            .subqueryload("extra_keywords")
-        )
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (SubItem, ("lazy", "subquery")),
-                ("extra_keywords", Keyword, ("lazy", "subquery")),
-            ),
-        )
-
-    def test_unbound_cache_key_excluded_of_type_safe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-        # query of:
-        #
-        # query(User).options(
-        #       subqueryload(User.orders).
-        #       subqueryload(Order.items.of_type(SubItem)))
-        #
-        #
-        # we are lazy loading Address objects from User.addresses
-        # the path excludes our option so cache key should
-        # be None
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = subqueryload(User.orders).subqueryload(
-            Order.items.of_type(SubItem)
-        )
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_unbound_cache_key_excluded_of_type_unsafe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-        # query of:
-        #
-        # query(User).options(
-        #       subqueryload(User.orders).
-        #       subqueryload(Order.items.of_type(aliased(SubItem))))
-        #
-        #
-        # we are lazy loading Address objects from User.addresses
-        # the path excludes our option so cache key should
-        # be None
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = subqueryload(User.orders).subqueryload(
-            Order.items.of_type(aliased(SubItem))
-        )
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_bound_cache_key_excluded_of_type_safe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-        # query of:
-        #
-        # query(User).options(
-        #       subqueryload(User.orders).
-        #       subqueryload(Order.items.of_type(SubItem)))
-        #
-        #
-        # we are lazy loading Address objects from User.addresses
-        # the path excludes our option so cache key should
-        # be None
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = (
-            Load(User)
-            .subqueryload(User.orders)
-            .subqueryload(Order.items.of_type(SubItem))
-        )
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_bound_cache_key_excluded_of_type_unsafe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-        # query of:
-        #
-        # query(User).options(
-        #       subqueryload(User.orders).
-        #       subqueryload(Order.items.of_type(aliased(SubItem))))
-        #
-        #
-        # we are lazy loading Address objects from User.addresses
-        # the path excludes our option so cache key should
-        # be None
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = (
-            Load(User)
-            .subqueryload(User.orders)
-            .subqueryload(Order.items.of_type(aliased(SubItem)))
-        )
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_unbound_cache_key_included_of_type_safe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        opt = joinedload(User.orders).joinedload(Order.items.of_type(SubItem))
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            ((Order, "items", SubItem, ("lazy", "joined")),),
-        )
-
-    def test_bound_cache_key_included_of_type_safe(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        opt = (
-            Load(User)
-            .joinedload(User.orders)
-            .joinedload(Order.items.of_type(SubItem))
-        )
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            ((Order, "items", SubItem, ("lazy", "joined")),),
-        )
-
-    def test_unbound_cache_key_included_unsafe_option_one(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        opt = joinedload(User.orders).joinedload(
-            Order.items.of_type(aliased(SubItem))
-        )
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_unbound_cache_key_included_unsafe_option_two(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders", Order])
-
-        opt = joinedload(User.orders).joinedload(
-            Order.items.of_type(aliased(SubItem))
-        )
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_unbound_cache_key_included_unsafe_option_three(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders", Order, "items"])
-
-        opt = joinedload(User.orders).joinedload(
-            Order.items.of_type(aliased(SubItem))
-        )
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_unbound_cache_key_included_unsafe_query(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        au = aliased(User)
-        query_path = self._make_path_registry([inspect(au), "orders"])
-
-        opt = joinedload(au.orders).joinedload(Order.items)
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_unbound_cache_key_included_safe_w_deferred(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = (
-            joinedload(User.addresses)
-            .defer(Address.email_address)
-            .defer(Address.user_id)
-        )
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (
-                    Address,
-                    "email_address",
-                    ("deferred", True),
-                    ("instrument", True),
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses),
+                    lazy="select",
+                    order_by=addresses.c.id,
                 ),
-                (Address, "user_id", ("deferred", True), ("instrument", True)),
+                adlist=synonym("addresses"),
             ),
         )
 
-    def test_unbound_cache_key_included_safe_w_deferred_multipath(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+        def go():
+            sess = fixture_session()
+            u = (
+                sess.query(User)
+                .order_by(User.id)
+                .options(sa.orm.joinedload("adlist"))
+                .filter_by(name="jack")
+            ).one()
+            eq_(u.adlist, [self.static.user_address_result[0].addresses[0]])
+
+        self.assert_sql_count(testing.db, go, 1)
+
+    def test_eager_options(self):
+        """A lazy relationship can be upgraded to an eager relationship."""
+
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
         )
 
-        query_path = self._make_path_registry([User, "orders"])
-
-        base = joinedload(User.orders)
-        opt1 = base.joinedload(Order.items)
-        opt2 = (
-            base.joinedload(Order.address)
-            .defer(Address.email_address)
-            .defer(Address.user_id)
-        )
-
-        eq_(
-            opt1._generate_path_cache_key(query_path),
-            ((Order, "items", Item, ("lazy", "joined")),),
-        )
-
-        eq_(
-            opt2._generate_path_cache_key(query_path),
-            (
-                (Order, "address", Address, ("lazy", "joined")),
-                (
-                    Order,
-                    "address",
-                    Address,
-                    "email_address",
-                    ("deferred", True),
-                    ("instrument", True),
-                ),
-                (
-                    Order,
-                    "address",
-                    Address,
-                    "user_id",
-                    ("deferred", True),
-                    ("instrument", True),
-                ),
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses), order_by=addresses.c.id
+                )
             ),
         )
 
-    def test_bound_cache_key_included_safe_w_deferred(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+        sess = fixture_session()
+        result = (
+            sess.query(User)
+            .order_by(User.id)
+            .options(sa.orm.joinedload("addresses"))
+        ).all()
+
+        def go():
+            eq_(result, self.static.user_address_result)
+
+        self.sql_count_(0, go)
+
+    def test_eager_options_with_limit(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
         )
 
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = (
-            Load(User)
-            .joinedload(User.addresses)
-            .defer(Address.email_address)
-            .defer(Address.user_id)
-        )
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (
-                    Address,
-                    "email_address",
-                    ("deferred", True),
-                    ("instrument", True),
-                ),
-                (Address, "user_id", ("deferred", True), ("instrument", True)),
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses), lazy="select"
+                )
             ),
         )
 
-    def test_bound_cache_key_included_safe_w_deferred_multipath(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+        sess = fixture_session()
+        u = (
+            sess.query(User)
+            .options(sa.orm.joinedload("addresses"))
+            .filter_by(id=8)
+        ).one()
+
+        def go():
+            eq_(u.id, 8)
+            eq_(len(u.addresses), 3)
+
+        self.sql_count_(0, go)
+
+        sess.expunge_all()
+
+        u = sess.query(User).filter_by(id=8).one()
+        eq_(u.id, 8)
+        eq_(len(u.addresses), 3)
+
+    def test_lazy_options_with_limit(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
         )
 
-        query_path = self._make_path_registry([User, "orders"])
-
-        base = Load(User).joinedload(User.orders)
-        opt1 = base.joinedload(Order.items)
-        opt2 = (
-            base.joinedload(Order.address)
-            .defer(Address.email_address)
-            .defer(Address.user_id)
-        )
-
-        eq_(
-            opt1._generate_path_cache_key(query_path),
-            ((Order, "items", Item, ("lazy", "joined")),),
-        )
-
-        eq_(
-            opt2._generate_path_cache_key(query_path),
-            (
-                (Order, "address", Address, ("lazy", "joined")),
-                (
-                    Order,
-                    "address",
-                    Address,
-                    "email_address",
-                    ("deferred", True),
-                    ("instrument", True),
-                ),
-                (
-                    Order,
-                    "address",
-                    Address,
-                    "user_id",
-                    ("deferred", True),
-                    ("instrument", True),
-                ),
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses), lazy="joined"
+                )
             ),
         )
 
-    def test_unbound_cache_key_included_safe_w_option(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+        sess = fixture_session()
+        u = (
+            sess.query(User)
+            .options(sa.orm.lazyload("addresses"))
+            .filter_by(id=8)
+        ).one()
+
+        def go():
+            eq_(u.id, 8)
+            eq_(len(u.addresses), 3)
+
+        self.sql_count_(1, go)
+
+    def test_eager_degrade(self):
+        """An eager relationship automatically degrades to a lazy relationship
+        if eager columns are not available"""
+
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
         )
 
-        opt = (
-            defaultload("orders")
-            .joinedload("items", innerjoin=True)
-            .defer("description")
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses),
+                    lazy="joined",
+                    order_by=addresses.c.id,
+                )
+            ),
         )
-        query_path = self._make_path_registry([User, "orders"])
 
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (
-                    Order,
-                    "items",
+        sess = fixture_session()
+        # first test straight eager load, 1 statement
+
+        def go():
+            result = sess.query(User).order_by(User.id).all()
+            eq_(result, self.static.user_address_result)
+
+        self.sql_count_(1, go)
+
+        sess.expunge_all()
+
+        # then select just from users.  run it into instances.
+        # then assert the data, which will launch 3 more lazy loads
+        # (previous users in session fell out of scope and were removed from
+        # session's identity map)
+        r = sess.connection().execute(users.select().order_by(users.c.id))
+
+        ctx = sess.query(User)._compile_context()
+
+        def go():
+            result = list(sess.query(User).instances(r, ctx))
+            eq_(result, self.static.user_address_result)
+
+        self.sql_count_(4, go)
+
+    def test_eager_degrade_deep(self):
+        (
+            users,
+            Keyword,
+            items,
+            order_items,
+            orders,
+            Item,
+            User,
+            Address,
+            keywords,
+            item_keywords,
+            Order,
+            addresses,
+        ) = (
+            self.tables.users,
+            self.classes.Keyword,
+            self.tables.items,
+            self.tables.order_items,
+            self.tables.orders,
+            self.classes.Item,
+            self.classes.User,
+            self.classes.Address,
+            self.tables.keywords,
+            self.tables.item_keywords,
+            self.classes.Order,
+            self.tables.addresses,
+        )
+
+        # test with a deeper set of eager loads.  when we first load the three
+        # users, they will have no addresses or orders.  the number of lazy
+        # loads when traversing the whole thing will be three for the
+        # addresses and three for the orders.
+        mapper(Address, addresses)
+
+        mapper(Keyword, keywords)
+
+        mapper(
+            Item,
+            items,
+            properties=dict(
+                keywords=relationship(
+                    Keyword,
+                    secondary=item_keywords,
+                    lazy="joined",
+                    order_by=item_keywords.c.keyword_id,
+                )
+            ),
+        )
+
+        mapper(
+            Order,
+            orders,
+            properties=dict(
+                items=relationship(
                     Item,
-                    ("lazy", "joined"),
-                    ("innerjoin", True),
+                    secondary=order_items,
+                    lazy="joined",
+                    order_by=order_items.c.item_id,
+                )
+            ),
+        )
+
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    Address, lazy="joined", order_by=addresses.c.id
                 ),
-                (
-                    Order,
-                    "items",
-                    Item,
-                    "description",
-                    ("deferred", True),
-                    ("instrument", True),
+                orders=relationship(
+                    Order, lazy="joined", order_by=orders.c.id
                 ),
             ),
         )
 
-    def test_bound_cache_key_excluded_on_aliased(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+        sess = fixture_session()
+
+        # first test straight eager load, 1 statement
+        def go():
+            result = sess.query(User).order_by(User.id).all()
+            eq_(result, self.static.user_all_result)
+
+        self.assert_sql_count(testing.db, go, 1)
+
+        sess.expunge_all()
+
+        # then select just from users.  run it into instances.
+        # then assert the data, which will launch 6 more lazy loads
+        r = sess.connection().execute(users.select())
+
+        ctx = sess.query(User)._compile_context()
+
+        def go():
+            result = list(sess.query(User).instances(r, ctx))
+            eq_(result, self.static.user_all_result)
+
+        self.assert_sql_count(testing.db, go, 6)
+
+    def test_lazy_options(self):
+        """An eager relationship can be upgraded to a lazy relationship."""
+
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
         )
 
-        query_path = self._make_path_registry([User, "orders"])
-
-        au = aliased(User)
-        opt = Load(au).joinedload(au.orders).joinedload(Order.items)
-        eq_(opt._generate_path_cache_key(query_path), None)
-
-    def test_bound_cache_key_included_unsafe_option_one(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders"])
-
-        opt = (
-            Load(User)
-            .joinedload(User.orders)
-            .joinedload(Order.items.of_type(aliased(SubItem)))
-        )
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_bound_cache_key_included_unsafe_option_two(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders", Order])
-
-        opt = (
-            Load(User)
-            .joinedload(User.orders)
-            .joinedload(Order.items.of_type(aliased(SubItem)))
-        )
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_bound_cache_key_included_unsafe_option_three(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "orders", Order, "items"])
-
-        opt = (
-            Load(User)
-            .joinedload(User.orders)
-            .joinedload(Order.items.of_type(aliased(SubItem)))
-        )
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_bound_cache_key_included_unsafe_query(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        au = aliased(User)
-        query_path = self._make_path_registry([inspect(au), "orders"])
-
-        opt = Load(au).joinedload(au.orders).joinedload(Order.items)
-        eq_(opt._generate_path_cache_key(query_path), False)
-
-    def test_bound_cache_key_included_safe_w_option(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        opt = (
-            Load(User)
-            .defaultload("orders")
-            .joinedload("items", innerjoin=True)
-            .defer("description")
-        )
-        query_path = self._make_path_registry([User, "orders"])
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (
-                    Order,
-                    "items",
-                    Item,
-                    ("lazy", "joined"),
-                    ("innerjoin", True),
-                ),
-                (
-                    Order,
-                    "items",
-                    Item,
-                    "description",
-                    ("deferred", True),
-                    ("instrument", True),
-                ),
+        mapper(
+            User,
+            users,
+            properties=dict(
+                addresses=relationship(
+                    mapper(Address, addresses), lazy="joined"
+                )
             ),
         )
 
-    def test_unbound_cache_key_included_safe_w_loadonly_strs(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+        sess = fixture_session()
+        result = (
+            sess.query(User)
+            .order_by(User.id)
+            .options(sa.orm.lazyload("addresses"))
+        ).all()
+
+        def go():
+            eq_(result, self.static.user_address_result)
+
+        self.sql_count_(4, go)
+
+    def test_option_propagate(self):
+        users, items, order_items, Order, Item, User, orders = (
+            self.tables.users,
+            self.tables.items,
+            self.tables.order_items,
+            self.classes.Order,
+            self.classes.Item,
+            self.classes.User,
+            self.tables.orders,
         )
 
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = defaultload(User.addresses).load_only("id", "email_address")
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (Address, "id", ("deferred", False), ("instrument", True)),
-                (
-                    Address,
-                    "email_address",
-                    ("deferred", False),
-                    ("instrument", True),
-                ),
-                (
-                    Address,
-                    "column:*",
-                    ("deferred", True),
-                    ("instrument", True),
-                    ("undefer_pks", True),
-                ),
-            ),
+        mapper(User, users, properties=dict(orders=relationship(Order)))
+        mapper(
+            Order,
+            orders,
+            properties=dict(items=relationship(Item, secondary=order_items)),
         )
+        mapper(Item, items)
 
-    def test_unbound_cache_key_included_safe_w_loadonly_props(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
+        sess = fixture_session()
+
+        oalias = aliased(Order)
+        opt1 = sa.orm.joinedload(User.orders, Order.items)
+        opt2 = sa.orm.contains_eager(User.orders, Order.items, alias=oalias)
+        u1 = (
+            sess.query(User)
+            .join(oalias, User.orders)
+            .options(opt1, opt2)
+            .first()
         )
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = defaultload(User.addresses).load_only(
-            Address.id, Address.email_address
-        )
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (Address, "id", ("deferred", False), ("instrument", True)),
-                (
-                    Address,
-                    "email_address",
-                    ("deferred", False),
-                    ("instrument", True),
-                ),
-                (
-                    Address,
-                    "column:*",
-                    ("deferred", True),
-                    ("instrument", True),
-                    ("undefer_pks", True),
-                ),
-            ),
-        )
-
-    def test_bound_cache_key_included_safe_w_loadonly(self):
-        User, Address, Order, Item, SubItem = self.classes(
-            "User", "Address", "Order", "Item", "SubItem"
-        )
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = (
-            Load(User)
-            .defaultload(User.addresses)
-            .load_only("id", "email_address")
-        )
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            (
-                (Address, "id", ("deferred", False), ("instrument", True)),
-                (
-                    Address,
-                    "email_address",
-                    ("deferred", False),
-                    ("instrument", True),
-                ),
-                (
-                    Address,
-                    "column:*",
-                    ("deferred", True),
-                    ("instrument", True),
-                    ("undefer_pks", True),
-                ),
-            ),
-        )
-
-    def test_unbound_cache_key_undefer_group(self):
-        User, Address = self.classes("User", "Address")
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = defaultload(User.addresses).undefer_group("xyz")
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            ((Address, "column:*", ("undefer_group_xyz", True)),),
-        )
-
-    def test_bound_cache_key_undefer_group(self):
-        User, Address = self.classes("User", "Address")
-
-        query_path = self._make_path_registry([User, "addresses"])
-
-        opt = Load(User).defaultload(User.addresses).undefer_group("xyz")
-
-        eq_(
-            opt._generate_path_cache_key(query_path),
-            ((Address, "column:*", ("undefer_group_xyz", True)),),
-        )
+        ustate = attributes.instance_state(u1)
+        assert opt1 in ustate.load_options
+        assert opt2 not in ustate.load_options

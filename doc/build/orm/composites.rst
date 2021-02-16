@@ -1,4 +1,4 @@
-.. module:: sqlalchemy.orm
+.. currentmodule:: sqlalchemy.orm
 
 .. _mapper_composite:
 
@@ -39,7 +39,7 @@ also should supply adequate ``__eq__()`` and ``__ne__()`` methods which test
 the equality of two instances.
 
 We will create a mapping to a table ``vertices``, which represents two points
-as ``x1/y1`` and ``x2/y2``. These are created normally as :class:`.Column`
+as ``x1/y1`` and ``x2/y2``. These are created normally as :class:`_schema.Column`
 objects. Then, the :func:`.composite` function is used to assign new
 attributes that will represent sets of columns via the ``Point`` class::
 
@@ -64,7 +64,7 @@ attributes that will represent sets of columns via the ``Point`` class::
 A classical mapping above would define each :func:`.composite`
 against the existing table::
 
-    mapper(Vertex, vertices_table, properties={
+    mapper_registry.map_imperatively(Vertex, vertices_table, properties={
         'start':composite(Point, vertices_table.c.x1, vertices_table.c.y1),
         'end':composite(Point, vertices_table.c.x2, vertices_table.c.y2),
     })

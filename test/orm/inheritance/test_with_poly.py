@@ -1,9 +1,10 @@
 from sqlalchemy import and_
+from sqlalchemy import exc
 from sqlalchemy import or_
 from sqlalchemy import testing
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import with_polymorphic
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing.fixtures import fixture_session
 from ._poly_fixtures import _Polymorphic
 from ._poly_fixtures import _PolymorphicAliasedJoins
 from ._poly_fixtures import _PolymorphicFixtureBase
@@ -16,9 +17,27 @@ from ._poly_fixtures import Manager
 from ._poly_fixtures import Person
 
 
+class WithPolymorphicAPITest(_Polymorphic, _PolymorphicFixtureBase):
+    def test_no_use_flat_and_aliased(self):
+        sess = fixture_session()
+
+        subq = sess.query(Person).subquery()
+
+        testing.assert_raises_message(
+            exc.ArgumentError,
+            "the 'flat' and 'selectable' arguments cannot be passed "
+            "simultaneously to with_polymorphic()",
+            with_polymorphic,
+            Person,
+            [Engineer],
+            selectable=subq,
+            flat=True,
+        )
+
+
 class _WithPolymorphicBase(_PolymorphicFixtureBase):
     def test_join_base_to_sub(self):
-        sess = create_session()
+        sess = fixture_session()
         pa = with_polymorphic(Person, [Engineer])
 
         def go():
@@ -32,7 +51,7 @@ class _WithPolymorphicBase(_PolymorphicFixtureBase):
         self.assert_sql_count(testing.db, go, 1)
 
     def test_col_expression_base_plus_two_subs(self):
-        sess = create_session()
+        sess = fixture_session()
         pa = with_polymorphic(Person, [Engineer, Manager])
 
         eq_(
@@ -51,7 +70,7 @@ class _WithPolymorphicBase(_PolymorphicFixtureBase):
         )
 
     def test_join_to_join_entities(self):
-        sess = create_session()
+        sess = fixture_session()
         pa = with_polymorphic(Person, [Engineer])
         pa_alias = with_polymorphic(Person, [Engineer], aliased=True)
 
@@ -82,7 +101,7 @@ class _WithPolymorphicBase(_PolymorphicFixtureBase):
         )
 
     def test_join_to_join_columns(self):
-        sess = create_session()
+        sess = fixture_session()
         pa = with_polymorphic(Person, [Engineer])
         pa_alias = with_polymorphic(Person, [Engineer], aliased=True)
 

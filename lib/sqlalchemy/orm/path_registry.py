@@ -1,5 +1,5 @@
 # orm/path_registry.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -216,6 +216,8 @@ class RootRegistry(PathRegistry):
 
     """
 
+    inherit_cache = True
+
     path = natural_path = ()
     has_entity = False
     is_aliased_class = False
@@ -228,10 +230,31 @@ class RootRegistry(PathRegistry):
 PathRegistry.root = RootRegistry()
 
 
+class PathToken(HasCacheKey, str):
+    """cacheable string token"""
+
+    _intern = {}
+
+    def _gen_cache_key(self, anon_map, bindparams):
+        return (str(self),)
+
+    @classmethod
+    def intern(cls, strvalue):
+        if strvalue in cls._intern:
+            return cls._intern[strvalue]
+        else:
+            cls._intern[strvalue] = result = PathToken(strvalue)
+            return result
+
+
 class TokenRegistry(PathRegistry):
     __slots__ = ("token", "parent", "path", "natural_path")
 
+    inherit_cache = True
+
     def __init__(self, parent, token):
+        token = PathToken.intern(token)
+
         self.token = token
         self.parent = parent
         self.path = parent.path + (token,)
@@ -261,6 +284,7 @@ class TokenRegistry(PathRegistry):
 
 class PropRegistry(PathRegistry):
     is_unnatural = False
+    inherit_cache = True
 
     def __init__(self, parent, prop):
         # restate this path in terms of the
@@ -332,7 +356,7 @@ class PropRegistry(PathRegistry):
             parent.path + self.prop._wildcard_token,
         )
         self._default_path_loader_key = self.prop._default_path_loader_key
-        self._loader_key = ("loader", self.path)
+        self._loader_key = ("loader", self.natural_path)
 
     def __str__(self):
         return " -> ".join(str(elem) for elem in self.path)
@@ -394,7 +418,15 @@ class AbstractEntityRegistry(PathRegistry):
                 self.natural_path = parent.natural_path + (
                     parent.natural_path[-1].entity,
                 )
+        # it seems to make sense that since these paths get mixed up
+        # with statements that are cached or not, we should make
+        # sure the natural path is cachable across different occurrences
+        # of equivalent AliasedClass objects.  however, so far this
+        # does not seem to be needed for whatever reason.
+        # elif not parent.path and self.is_aliased_class:
+        #     self.natural_path = (self.entity._generate_cache_key()[0], )
         else:
+            # self.natural_path = parent.natural_path + (entity, )
             self.natural_path = self.path
 
     @property
@@ -420,6 +452,7 @@ class AbstractEntityRegistry(PathRegistry):
 class SlotsEntityRegistry(AbstractEntityRegistry):
     # for aliased class, return lightweight, no-cycles created
     # version
+    inherit_cache = True
 
     __slots__ = (
         "key",
@@ -434,6 +467,8 @@ class SlotsEntityRegistry(AbstractEntityRegistry):
 class CachingEntityRegistry(AbstractEntityRegistry, dict):
     # for long lived mapper, return dict based caching
     # version that creates reference cycles
+
+    inherit_cache = True
 
     def __getitem__(self, entity):
         if isinstance(entity, (int, slice)):

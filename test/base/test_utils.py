@@ -24,135 +24,13 @@ from sqlalchemy.testing import mock
 from sqlalchemy.testing import ne_
 from sqlalchemy.testing.util import gc_collect
 from sqlalchemy.testing.util import picklers
+from sqlalchemy.util import _preloaded
 from sqlalchemy.util import classproperty
 from sqlalchemy.util import compat
 from sqlalchemy.util import get_callable_argspec
 from sqlalchemy.util import langhelpers
 from sqlalchemy.util import timezone
 from sqlalchemy.util import WeakSequence
-
-
-class _KeyedTupleTest(object):
-    def _fixture(self, values, labels):
-        raise NotImplementedError()
-
-    def test_empty(self):
-        keyed_tuple = self._fixture([], [])
-        eq_(str(keyed_tuple), "()")
-        eq_(len(keyed_tuple), 0)
-
-        eq_(list(keyed_tuple.keys()), [])
-        eq_(keyed_tuple._fields, ())
-        eq_(keyed_tuple._asdict(), {})
-
-    def test_values_but_no_labels(self):
-        keyed_tuple = self._fixture([1, 2], [])
-        eq_(str(keyed_tuple), "(1, 2)")
-        eq_(len(keyed_tuple), 2)
-
-        eq_(list(keyed_tuple.keys()), [])
-        eq_(keyed_tuple._fields, ())
-        eq_(keyed_tuple._asdict(), {})
-
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-
-    def test_basic_creation(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(str(keyed_tuple), "(1, 2)")
-        eq_(list(keyed_tuple.keys()), ["a", "b"])
-        eq_(keyed_tuple._fields, ("a", "b"))
-        eq_(keyed_tuple._asdict(), {"a": 1, "b": 2})
-
-    def test_basic_index_access(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-
-        def should_raise():
-            keyed_tuple[2]
-
-        assert_raises(IndexError, should_raise)
-
-    def test_basic_attribute_access(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(keyed_tuple.a, 1)
-        eq_(keyed_tuple.b, 2)
-
-        def should_raise():
-            keyed_tuple.c
-
-        assert_raises(AttributeError, should_raise)
-
-    def test_none_label(self):
-        keyed_tuple = self._fixture([1, 2, 3], ["a", None, "b"])
-        eq_(str(keyed_tuple), "(1, 2, 3)")
-
-        eq_(list(keyed_tuple.keys()), ["a", "b"])
-        eq_(keyed_tuple._fields, ("a", "b"))
-        eq_(keyed_tuple._asdict(), {"a": 1, "b": 3})
-
-        # attribute access: can't get at value 2
-        eq_(keyed_tuple.a, 1)
-        eq_(keyed_tuple.b, 3)
-
-        # index access: can get at value 2
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-        eq_(keyed_tuple[2], 3)
-
-    def test_duplicate_labels(self):
-        keyed_tuple = self._fixture([1, 2, 3], ["a", "b", "b"])
-        eq_(str(keyed_tuple), "(1, 2, 3)")
-
-        eq_(list(keyed_tuple.keys()), ["a", "b", "b"])
-        eq_(keyed_tuple._fields, ("a", "b", "b"))
-        eq_(keyed_tuple._asdict(), {"a": 1, "b": 3})
-
-        # attribute access: can't get at value 2
-        eq_(keyed_tuple.a, 1)
-        eq_(keyed_tuple.b, 3)
-
-        # index access: can get at value 2
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-        eq_(keyed_tuple[2], 3)
-
-    def test_immutable(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(str(keyed_tuple), "(1, 2)")
-
-        eq_(keyed_tuple.a, 1)
-
-        assert_raises(AttributeError, setattr, keyed_tuple, "a", 5)
-
-        def should_raise():
-            keyed_tuple[0] = 100
-
-        assert_raises(TypeError, should_raise)
-
-    def test_serialize(self):
-
-        keyed_tuple = self._fixture([1, 2, 3], ["a", None, "b"])
-
-        for loads, dumps in picklers():
-            kt = loads(dumps(keyed_tuple))
-
-            eq_(str(kt), "(1, 2, 3)")
-
-            eq_(list(kt.keys()), ["a", "b"])
-            eq_(kt._fields, ("a", "b"))
-            eq_(kt._asdict(), {"a": 1, "b": 3})
-
-
-class KeyedTupleTest(_KeyedTupleTest, fixtures.TestBase):
-    def _fixture(self, values, labels):
-        return util.KeyedTuple(values, labels)
-
-
-class LWKeyedTupleTest(_KeyedTupleTest, fixtures.TestBase):
-    def _fixture(self, values, labels):
-        return util.lightweight_named_tuple("n", labels)(values)
 
 
 class WeakSequenceTest(fixtures.TestBase):
@@ -253,6 +131,33 @@ class OrderedDictTest(fixtures.TestBase):
         o3 = copy.copy(o)
         eq_(list(o3.keys()), list(o.keys()))
 
+    def test_no_sort_legacy_dictionary(self):
+        d1 = {"c": 1, "b": 2, "a": 3}
+
+        if testing.requires.python37.enabled:
+            util.sort_dictionary(d1)
+            eq_(list(d1), ["a", "b", "c"])
+        else:
+            assert_raises(AttributeError, util.sort_dictionary, d1)
+
+    def test_sort_dictionary(self):
+        o = util.OrderedDict()
+
+        o["za"] = 1
+        o["az"] = 2
+        o["cc"] = 3
+
+        eq_(
+            list(o),
+            ["za", "az", "cc"],
+        )
+
+        util.sort_dictionary(o)
+        eq_(list(o), ["az", "cc", "za"])
+
+        util.sort_dictionary(o, lambda key: key[1])
+        eq_(list(o), ["za", "cc", "az"])
+
 
 class OrderedSetTest(fixtures.TestBase):
     def test_mutators_against_iter(self):
@@ -264,11 +169,109 @@ class OrderedSetTest(fixtures.TestBase):
         eq_(o.union(iter([3, 4, 6])), util.OrderedSet([2, 3, 4, 5, 6]))
 
 
-class FrozenDictTest(fixtures.TestBase):
+class ImmutableDictTest(fixtures.TestBase):
+    def test_union_no_change(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.union({})
+
+        is_(d2, d)
+
+    def test_merge_with_no_change(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.merge_with({}, None)
+
+        eq_(d2, {1: 2, 3: 4})
+        is_(d2, d)
+
+    def test_merge_with_dicts(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.merge_with({3: 5, 7: 12}, {9: 18, 15: 25})
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12, 9: 18, 15: 25})
+        assert isinstance(d2, util.immutabledict)
+
+        d3 = d.merge_with({17: 42})
+
+        eq_(d3, {1: 2, 3: 4, 17: 42})
+
+    def test_merge_with_tuples(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.merge_with([(3, 5), (7, 12)], [(9, 18), (15, 25)])
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12, 9: 18, 15: 25})
+
+    def test_union_dictionary(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.union({3: 5, 7: 12})
+        assert isinstance(d2, util.immutabledict)
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12})
+
+    def _dont_test_union_kw(self):
+        d = util.immutabledict({"a": "b", "c": "d"})
+
+        d2 = d.union(e="f", g="h")
+        assert isinstance(d2, util.immutabledict)
+
+        eq_(d, {"a": "b", "c": "d"})
+        eq_(d2, {"a": "b", "c": "d", "e": "f", "g": "h"})
+
+    def test_union_tuples(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.union([(3, 5), (7, 12)])
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12})
+
+    def test_keys(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        eq_(set(d.keys()), {1, 3})
+
+    def test_values(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        eq_(set(d.values()), {2, 4})
+
+    def test_items(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        eq_(set(d.items()), {(1, 2), (3, 4)})
+
+    def test_contains(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        assert 1 in d
+        assert "foo" not in d
+
+    def test_rich_compare(self):
+        d = util.immutabledict({1: 2, 3: 4})
+        d2 = util.immutabledict({1: 2, 3: 4})
+        d3 = util.immutabledict({5: 12})
+        d4 = {5: 12}
+
+        eq_(d, d2)
+        ne_(d, d3)
+        ne_(d, d4)
+        eq_(d3, d4)
+
     def test_serialize(self):
         d = util.immutabledict({1: 2, 3: 4})
         for loads, dumps in picklers():
-            print(loads(dumps(d)))
+            d2 = loads(dumps(d))
+
+            eq_(d2, {1: 2, 3: 4})
+
+            assert isinstance(d2, util.immutabledict)
 
 
 class MemoizedAttrTest(fixtures.TestBase):
@@ -414,7 +417,8 @@ class WrapCallableTest(fixtures.TestBase):
             lambda: my_functools_default(), my_functools_default
         )
         eq_(c.__name__, "partial")
-        eq_(c.__doc__, my_functools_default.__call__.__doc__)
+        if not compat.pypy:  # pypy fails this check
+            eq_(c.__doc__, my_functools_default.__call__.__doc__)
         eq_(c(), 5)
 
 
@@ -483,6 +487,23 @@ class ColumnCollectionCommon(testing.AssertsCompiledSQL):
         is_true(cc.contains_column(c1))
         is_false(cc.contains_column(c3))
 
+    def test_contains_column_not_column(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+        cc = self._column_collection(columns=[("c1", c1), ("c2", c2)])
+
+        is_false(cc.contains_column(c3 == 2))
+
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            "contains_column cannot be used with string arguments",
+        ):
+            cc.contains_column("c1")
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            "contains_column cannot be used with string arguments",
+        ):
+            cc.contains_column("foo")
+
     def test_in(self):
         col1 = sql.column("col1")
         cc = self._column_collection(
@@ -520,6 +541,17 @@ class ColumnCollectionCommon(testing.AssertsCompiledSQL):
                 [("col1", c1), ("col2", c2), ("col3", c3)]
             ).compare(self._column_collection([("col1", c1), ("col2", c2)]))
         )
+
+    def test_str(self):
+        c1 = sql.column("col1")
+        c2 = c1.label("col2")
+        c3 = sql.column("col3")
+        cc = self._column_collection(
+            [("col1", c1), ("col2", c2), ("col3", c3)]
+        )
+
+        eq_(str(cc), "%s(%s, %s, %s)" % (type(cc).__name__, c1, c2, c3))
+        eq_(repr(cc), object.__repr__(cc))
 
 
 class ColumnCollectionTest(ColumnCollectionCommon, fixtures.TestBase):
@@ -1170,6 +1202,13 @@ class HashOverride(object):
         return hash(self.value)
 
 
+class NoHash(object):
+    def __init__(self, value=None):
+        self.value = value
+
+    __hash__ = None
+
+
 class EqOverride(object):
     def __init__(self, value=None):
         self.value = value
@@ -1210,6 +1249,8 @@ class HashEqOverride(object):
 
 
 class IdentitySetTest(fixtures.TestBase):
+    obj_type = object
+
     def assert_eq(self, identityset, expected_iterable):
         expected = sorted([id(o) for o in expected_iterable])
         found = sorted([id(o) for o in identityset])
@@ -1239,7 +1280,7 @@ class IdentitySetTest(fixtures.TestBase):
                 ids.add(data[i])
             self.assert_eq(ids, data)
 
-        for type_ in (EqOverride, HashOverride, HashEqOverride):
+        for type_ in (NoHash, EqOverride, HashOverride, HashEqOverride):
             data = [type_(1), type_(1), type_(2)]
             ids = util.IdentitySet()
             for i in list(range(3)) + list(range(3)):
@@ -1248,7 +1289,7 @@ class IdentitySetTest(fixtures.TestBase):
 
     def test_dunder_sub2(self):
         IdentitySet = util.IdentitySet
-        o1, o2, o3 = object(), object(), object()
+        o1, o2, o3 = self.obj_type(), self.obj_type(), self.obj_type()
         ids1 = IdentitySet([o1])
         ids2 = IdentitySet([o1, o2, o3])
         eq_(ids2 - ids1, IdentitySet([o2, o3]))
@@ -1661,7 +1702,13 @@ class IdentitySetTest(fixtures.TestBase):
         pass  # TODO
 
     def _create_sets(self):
-        o1, o2, o3, o4, o5 = object(), object(), object(), object(), object()
+        o1, o2, o3, o4, o5 = (
+            self.obj_type(),
+            self.obj_type(),
+            self.obj_type(),
+            self.obj_type(),
+            self.obj_type(),
+        )
         super_ = util.IdentitySet([o1, o2, o3])
         sub_ = util.IdentitySet([o2])
         twin1 = util.IdentitySet([o3])
@@ -1671,12 +1718,10 @@ class IdentitySetTest(fixtures.TestBase):
         return super_, sub_, twin1, twin2, unique1, unique2
 
     def _assert_unorderable_types(self, callable_):
-        if util.py36:
+        if util.py3k:
             assert_raises_message(
                 TypeError, "not supported between instances of", callable_
             )
-        elif util.py3k:
-            assert_raises_message(TypeError, "unorderable types", callable_)
         else:
             assert_raises_message(
                 TypeError, "cannot compare sets using cmp()", callable_
@@ -1685,7 +1730,7 @@ class IdentitySetTest(fixtures.TestBase):
     def test_basic_sanity(self):
         IdentitySet = util.IdentitySet
 
-        o1, o2, o3 = object(), object(), object()
+        o1, o2, o3 = self.obj_type(), self.obj_type(), self.obj_type()
         ids = IdentitySet([o1])
         ids.discard(o1)
         ids.discard(o1)
@@ -1748,6 +1793,10 @@ class IdentitySetTest(fixtures.TestBase):
 
         assert_raises(TypeError, util.cmp, ids)
         assert_raises(TypeError, hash, ids)
+
+
+class NoHashIdentitySetTest(IdentitySetTest):
+    obj_type = NoHash
 
 
 class OrderedIdentitySetTest(fixtures.TestBase):
@@ -2293,7 +2342,14 @@ class SymbolTest(fixtures.TestBase):
 
 
 class _Py3KFixtures(object):
-    pass
+    def _kw_only_fixture(self):
+        pass
+
+    def _kw_plus_posn_fixture(self):
+        pass
+
+    def _kw_opt_fixture(self):
+        pass
 
 
 if util.py3k:
@@ -2314,9 +2370,193 @@ def _kw_opt_fixture(self, a, *, b, c="c"):
     for k in _locals:
         setattr(_Py3KFixtures, k, _locals[k])
 
+py3k_fixtures = _Py3KFixtures()
+
 
 class TestFormatArgspec(_Py3KFixtures, fixtures.TestBase):
-    def _test_format_argspec_plus(self, fn, wanted, grouped=None):
+    @testing.combinations(
+        (
+            lambda: None,
+            {
+                "args": "()",
+                "self_arg": None,
+                "apply_kw": "()",
+                "apply_pos": "()",
+                "apply_pos_proxied": "()",
+            },
+            True,
+        ),
+        (
+            lambda: None,
+            {
+                "args": "",
+                "self_arg": None,
+                "apply_kw": "",
+                "apply_pos": "",
+                "apply_pos_proxied": "",
+            },
+            False,
+        ),
+        (
+            lambda self: None,
+            {
+                "args": "(self)",
+                "self_arg": "self",
+                "apply_kw": "(self)",
+                "apply_pos": "(self)",
+                "apply_pos_proxied": "()",
+            },
+            True,
+        ),
+        (
+            lambda self: None,
+            {
+                "args": "self",
+                "self_arg": "self",
+                "apply_kw": "self",
+                "apply_pos": "self",
+                "apply_pos_proxied": "",
+            },
+            False,
+        ),
+        (
+            lambda *a: None,
+            {
+                "args": "(*a)",
+                "self_arg": "a[0]",
+                "apply_kw": "(*a)",
+                "apply_pos": "(*a)",
+                "apply_pos_proxied": "(*a)",
+            },
+            True,
+        ),
+        (
+            lambda **kw: None,
+            {
+                "args": "(**kw)",
+                "self_arg": None,
+                "apply_kw": "(**kw)",
+                "apply_pos": "(**kw)",
+                "apply_pos_proxied": "(**kw)",
+            },
+            True,
+        ),
+        (
+            lambda *a, **kw: None,
+            {
+                "args": "(*a, **kw)",
+                "self_arg": "a[0]",
+                "apply_kw": "(*a, **kw)",
+                "apply_pos": "(*a, **kw)",
+                "apply_pos_proxied": "(*a, **kw)",
+            },
+            True,
+        ),
+        (
+            lambda a, *b: None,
+            {
+                "args": "(a, *b)",
+                "self_arg": "a",
+                "apply_kw": "(a, *b)",
+                "apply_pos": "(a, *b)",
+                "apply_pos_proxied": "(*b)",
+            },
+            True,
+        ),
+        (
+            lambda a, **b: None,
+            {
+                "args": "(a, **b)",
+                "self_arg": "a",
+                "apply_kw": "(a, **b)",
+                "apply_pos": "(a, **b)",
+                "apply_pos_proxied": "(**b)",
+            },
+            True,
+        ),
+        (
+            lambda a, *b, **c: None,
+            {
+                "args": "(a, *b, **c)",
+                "self_arg": "a",
+                "apply_kw": "(a, *b, **c)",
+                "apply_pos": "(a, *b, **c)",
+                "apply_pos_proxied": "(*b, **c)",
+            },
+            True,
+        ),
+        (
+            lambda a, b=1, **c: None,
+            {
+                "args": "(a, b=1, **c)",
+                "self_arg": "a",
+                "apply_kw": "(a, b=b, **c)",
+                "apply_pos": "(a, b, **c)",
+                "apply_pos_proxied": "(b, **c)",
+            },
+            True,
+        ),
+        (
+            lambda a=1, b=2: None,
+            {
+                "args": "(a=1, b=2)",
+                "self_arg": "a",
+                "apply_kw": "(a=a, b=b)",
+                "apply_pos": "(a, b)",
+                "apply_pos_proxied": "(b)",
+            },
+            True,
+        ),
+        (
+            lambda a=1, b=2: None,
+            {
+                "args": "a=1, b=2",
+                "self_arg": "a",
+                "apply_kw": "a=a, b=b",
+                "apply_pos": "a, b",
+                "apply_pos_proxied": "b",
+            },
+            False,
+        ),
+        (
+            py3k_fixtures._kw_only_fixture,
+            {
+                "args": "self, a, *, b, c",
+                "self_arg": "self",
+                "apply_pos": "self, a, *, b, c",
+                "apply_kw": "self, a, b=b, c=c",
+                "apply_pos_proxied": "a, *, b, c",
+            },
+            False,
+            testing.requires.python3,
+        ),
+        (
+            py3k_fixtures._kw_plus_posn_fixture,
+            {
+                "args": "self, a, *args, b, c",
+                "self_arg": "self",
+                "apply_pos": "self, a, *args, b, c",
+                "apply_kw": "self, a, b=b, c=c, *args",
+                "apply_pos_proxied": "a, *args, b, c",
+            },
+            False,
+            testing.requires.python3,
+        ),
+        (
+            py3k_fixtures._kw_opt_fixture,
+            {
+                "args": "self, a, *, b, c='c'",
+                "self_arg": "self",
+                "apply_pos": "self, a, *, b, c",
+                "apply_kw": "self, a, b=b, c=c",
+                "apply_pos_proxied": "a, *, b, c",
+            },
+            False,
+            testing.requires.python3,
+        ),
+        argnames="fn,wanted,grouped",
+    )
+    def test_specs(self, fn, wanted, grouped):
 
         # test direct function
         if grouped is None:
@@ -2333,167 +2573,6 @@ class TestFormatArgspec(_Py3KFixtures, fixtures.TestBase):
             parsed = util.format_argspec_plus(spec, grouped=grouped)
         eq_(parsed, wanted)
 
-    def test_specs(self):
-        self._test_format_argspec_plus(
-            lambda: None,
-            {
-                "args": "()",
-                "self_arg": None,
-                "apply_kw": "()",
-                "apply_pos": "()",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda: None,
-            {"args": "", "self_arg": None, "apply_kw": "", "apply_pos": ""},
-            grouped=False,
-        )
-
-        self._test_format_argspec_plus(
-            lambda self: None,
-            {
-                "args": "(self)",
-                "self_arg": "self",
-                "apply_kw": "(self)",
-                "apply_pos": "(self)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda self: None,
-            {
-                "args": "self",
-                "self_arg": "self",
-                "apply_kw": "self",
-                "apply_pos": "self",
-            },
-            grouped=False,
-        )
-
-        self._test_format_argspec_plus(
-            lambda *a: None,
-            {
-                "args": "(*a)",
-                "self_arg": "a[0]",
-                "apply_kw": "(*a)",
-                "apply_pos": "(*a)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda **kw: None,
-            {
-                "args": "(**kw)",
-                "self_arg": None,
-                "apply_kw": "(**kw)",
-                "apply_pos": "(**kw)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda *a, **kw: None,
-            {
-                "args": "(*a, **kw)",
-                "self_arg": "a[0]",
-                "apply_kw": "(*a, **kw)",
-                "apply_pos": "(*a, **kw)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, *b: None,
-            {
-                "args": "(a, *b)",
-                "self_arg": "a",
-                "apply_kw": "(a, *b)",
-                "apply_pos": "(a, *b)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, **b: None,
-            {
-                "args": "(a, **b)",
-                "self_arg": "a",
-                "apply_kw": "(a, **b)",
-                "apply_pos": "(a, **b)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, *b, **c: None,
-            {
-                "args": "(a, *b, **c)",
-                "self_arg": "a",
-                "apply_kw": "(a, *b, **c)",
-                "apply_pos": "(a, *b, **c)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, b=1, **c: None,
-            {
-                "args": "(a, b=1, **c)",
-                "self_arg": "a",
-                "apply_kw": "(a, b=b, **c)",
-                "apply_pos": "(a, b, **c)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a=1, b=2: None,
-            {
-                "args": "(a=1, b=2)",
-                "self_arg": "a",
-                "apply_kw": "(a=a, b=b)",
-                "apply_pos": "(a, b)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a=1, b=2: None,
-            {
-                "args": "a=1, b=2",
-                "self_arg": "a",
-                "apply_kw": "a=a, b=b",
-                "apply_pos": "a, b",
-            },
-            grouped=False,
-        )
-
-        if util.py3k:
-            self._test_format_argspec_plus(
-                self._kw_only_fixture,
-                {
-                    "args": "self, a, *, b, c",
-                    "self_arg": "self",
-                    "apply_pos": "self, a, *, b, c",
-                    "apply_kw": "self, a, b=b, c=c",
-                },
-                grouped=False,
-            )
-            self._test_format_argspec_plus(
-                self._kw_plus_posn_fixture,
-                {
-                    "args": "self, a, *args, b, c",
-                    "self_arg": "self",
-                    "apply_pos": "self, a, *args, b, c",
-                    "apply_kw": "self, a, b=b, c=c, *args",
-                },
-                grouped=False,
-            )
-            self._test_format_argspec_plus(
-                self._kw_opt_fixture,
-                {
-                    "args": "self, a, *, b, c='c'",
-                    "self_arg": "self",
-                    "apply_pos": "self, a, *, b, c",
-                    "apply_kw": "self, a, b=b, c=c",
-                },
-                grouped=False,
-            )
-
     @testing.requires.cpython
     def test_init_grouped(self):
         object_spec = {
@@ -2501,17 +2580,20 @@ class TestFormatArgspec(_Py3KFixtures, fixtures.TestBase):
             "self_arg": "self",
             "apply_pos": "(self)",
             "apply_kw": "(self)",
+            "apply_pos_proxied": "()",
         }
         wrapper_spec = {
             "args": "(self, *args, **kwargs)",
             "self_arg": "self",
             "apply_pos": "(self, *args, **kwargs)",
             "apply_kw": "(self, *args, **kwargs)",
+            "apply_pos_proxied": "(*args, **kwargs)",
         }
         custom_spec = {
             "args": "(slef, a=123)",
             "self_arg": "slef",  # yes, slef
             "apply_pos": "(slef, a)",
+            "apply_pos_proxied": "(a)",
             "apply_kw": "(slef, a=a)",
         }
 
@@ -2525,18 +2607,21 @@ class TestFormatArgspec(_Py3KFixtures, fixtures.TestBase):
             "self_arg": "self",
             "apply_pos": "self",
             "apply_kw": "self",
+            "apply_pos_proxied": "",
         }
         wrapper_spec = {
             "args": "self, *args, **kwargs",
             "self_arg": "self",
             "apply_pos": "self, *args, **kwargs",
             "apply_kw": "self, *args, **kwargs",
+            "apply_pos_proxied": "*args, **kwargs",
         }
         custom_spec = {
             "args": "slef, a=123",
             "self_arg": "slef",  # yes, slef
             "apply_pos": "slef, a",
             "apply_kw": "slef, a=a",
+            "apply_pos_proxied": "a",
         }
 
         self._test_init(False, object_spec, wrapper_spec, custom_spec)
@@ -2883,20 +2968,7 @@ class ReraiseTest(fixtures.TestBase):
         except MyException as err:
             is_(err.__cause__, None)
 
-    def test_reraise_disallow_same_cause(self):
-        class MyException(Exception):
-            pass
-
-        def go():
-            try:
-                raise MyException("exc one")
-            except Exception as err:
-                type_, value, tb = sys.exc_info()
-                util.reraise(type_, err, tb, value)
-
-        assert_raises_message(AssertionError, "Same cause emitted", go)
-
-    def test_raise_from_cause(self):
+    def test_raise_from_cause_legacy(self):
         class MyException(Exception):
             pass
 
@@ -2910,6 +2982,28 @@ class ReraiseTest(fixtures.TestBase):
                 raise me
             except Exception:
                 util.raise_from_cause(MyOtherException("exc two"))
+
+        try:
+            go()
+            assert False
+        except MyOtherException as moe:
+            if testing.requires.python3.enabled:
+                is_(moe.__cause__, me)
+
+    def test_raise_from(self):
+        class MyException(Exception):
+            pass
+
+        class MyOtherException(Exception):
+            pass
+
+        me = MyException("exc on")
+
+        def go():
+            try:
+                raise me
+            except Exception as err:
+                util.raise_(MyOtherException("exc two"), from_=err)
 
         try:
             go()
@@ -3185,3 +3279,124 @@ class TimezoneTest(fixtures.TestBase):
             repr(timezone(datetime.timedelta(hours=5))),
             "sqlalchemy.util.timezone(%r)" % (datetime.timedelta(hours=5)),
         )
+
+
+class TestModuleRegistry(fixtures.TestBase):
+    def test_modules_are_loaded(self):
+        to_restore = []
+        for m in ("xml.dom", "wsgiref.simple_server"):
+            to_restore.append((m, sys.modules.pop(m, None)))
+        try:
+            mr = _preloaded._ModuleRegistry()
+
+            ret = mr.preload_module(
+                "xml.dom", "wsgiref.simple_server", "sqlalchemy.sql.util"
+            )
+            o = object()
+            is_(ret(o), o)
+
+            is_false(hasattr(mr, "xml_dom"))
+            mr.import_prefix("xml")
+            is_true("xml.dom" in sys.modules)
+            is_(sys.modules["xml.dom"], mr.xml_dom)
+
+            is_true("wsgiref.simple_server" not in sys.modules)
+            mr.import_prefix("wsgiref")
+            is_true("wsgiref.simple_server" in sys.modules)
+            is_(sys.modules["wsgiref.simple_server"], mr.wsgiref_simple_server)
+
+            mr.import_prefix("sqlalchemy")
+            is_(sys.modules["sqlalchemy.sql.util"], mr.sql_util)
+        finally:
+            for name, mod in to_restore:
+                if mod is not None:
+                    sys.modules[name] = mod
+
+
+class MethodOveriddenTest(fixtures.TestBase):
+    def test_subclass_overrides_cls_given(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(Bar, Foo.bar))
+
+    def test_subclass_overrides(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(Bar(), Foo.bar))
+
+    def test_subclass_overrides_skiplevel(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            pass
+
+        class Bat(Bar):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(Bat(), Foo.bar))
+
+    def test_subclass_overrides_twolevels(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            def bar(self):
+                pass
+
+        class Bat(Bar):
+            pass
+
+        is_true(util.method_is_overridden(Bat(), Foo.bar))
+
+    def test_subclass_doesnt_override_cls_given(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            pass
+
+        is_false(util.method_is_overridden(Bar, Foo.bar))
+
+    def test_subclass_doesnt_override(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            pass
+
+        is_false(util.method_is_overridden(Bar(), Foo.bar))
+
+    def test_subclass_overrides_multi_mro(self):
+        class Base(object):
+            pass
+
+        class Foo(object):
+            pass
+
+        class Bat(Base):
+            def bar(self):
+                pass
+
+        class HoHo(Foo, Bat):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(HoHo(), Bat.bar))

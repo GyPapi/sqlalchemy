@@ -14,9 +14,9 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_false
-from sqlalchemy.testing import is_not_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
-from sqlalchemy.testing import not_in_
+from sqlalchemy.testing import not_in
 from sqlalchemy.testing.mock import call
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.util import all_partial_orderings
@@ -209,7 +209,7 @@ class AttributeImplAPITest(fixtures.MappedTest):
 
 
 class AttributesTest(fixtures.ORMTest):
-    def setup(self):
+    def setup_test(self):
         global MyTest, MyTest2
 
         class MyTest(object):
@@ -218,7 +218,7 @@ class AttributesTest(fixtures.ORMTest):
         class MyTest2(object):
             pass
 
-    def teardown(self):
+    def teardown_test(self):
         global MyTest, MyTest2
         MyTest, MyTest2 = None, None
 
@@ -361,6 +361,27 @@ class AttributesTest(fixtures.ORMTest):
             lambda: Foo().bars.append(Bar()),
         )
 
+    def test_unmapped_instance_raises(self):
+        class User(object):
+            pass
+
+        instrumentation.register_class(User)
+        attributes.register_attribute(
+            User, "user_name", uselist=False, useobject=False
+        )
+
+        class Blog(object):
+            name = User.user_name
+
+        def go():
+            b = Blog()
+            return b.name
+
+        assert_raises(
+            orm_exc.UnmappedInstanceError,
+            go,
+        )
+
     def test_del_scalar_nonobject(self):
         class Foo(object):
             pass
@@ -442,7 +463,7 @@ class AttributesTest(fixtures.ORMTest):
 
         data = {"a": "this is a", "b": 12}
 
-        def loader(state, keys):
+        def loader(state, keys, passive):
             for k in keys:
                 state.dict[k] = data[k]
             return attributes.ATTR_WAS_SET
@@ -488,7 +509,7 @@ class AttributesTest(fixtures.ORMTest):
     def test_deferred_pickleable(self):
         data = {"a": "this is a", "b": 12}
 
-        def loader(state, keys):
+        def loader(state, keys, passive):
             for k in keys:
                 state.dict[k] = data[k]
             return attributes.ATTR_WAS_SET
@@ -577,7 +598,7 @@ class AttributesTest(fixtures.ORMTest):
 
     def test_lazytrackparent(self):
         """test that the "hasparent" flag works properly
-           when lazy loaders and backrefs are used
+        when lazy loaders and backrefs are used
 
         """
 
@@ -839,7 +860,7 @@ class AttributesTest(fixtures.ORMTest):
         """changeset: 1633 broke ability to use ORM to map classes with
         unusual descriptor attributes (for example, classes that inherit
         from ones implementing zope.interface.Interface). This is a
-        simple regression test to prevent that defect. """
+        simple regression test to prevent that defect."""
 
         class des(object):
             def __get__(self, instance, owner):
@@ -1091,7 +1112,7 @@ class UtilTest(fixtures.ORMTest):
 
     def test_set_commited_value_none_uselist(self):
         """test that set_committed_value->None to a uselist generates an
-        empty list """
+        empty list"""
 
         class Foo(object):
             pass
@@ -1636,7 +1657,9 @@ class PendingBackrefTest(fixtures.ORMTest):
 
         # then this would fail.
         eq_(
-            Blog.posts.impl.get_history(state, dict_, passive=True),
+            Blog.posts.impl.get_history(
+                state, dict_, passive=attributes.PASSIVE_NO_INITIALIZE
+            ),
             ([p2], (), ()),
         )
 
@@ -2242,7 +2265,7 @@ class HistoryTest(fixtures.TestBase):
         state.dict.pop("someattr", None)
         state.expired_attributes.add("someattr")
 
-        def scalar_loader(state, toload):
+        def scalar_loader(state, toload, passive):
             state.dict["someattr"] = "one"
 
         state.manager.expired_attribute_loader = scalar_loader
@@ -2901,27 +2924,6 @@ class HistoryTest(fixtures.TestBase):
         eq_(
             attributes.get_state_history(attributes.instance_state(b2), "foo"),
             ([f1], (), ()),
-        )
-
-    def test_deprecated_flags(self):
-        assert_raises_message(
-            sa_exc.SADeprecationWarning,
-            "Passing True for 'passive' is deprecated. "
-            "Use attributes.PASSIVE_NO_INITIALIZE",
-            attributes.get_history,
-            object(),
-            "foo",
-            True,
-        )
-
-        assert_raises_message(
-            sa_exc.SADeprecationWarning,
-            "Passing False for 'passive' is deprecated.  "
-            "Use attributes.PASSIVE_OFF",
-            attributes.get_history,
-            object(),
-            "foo",
-            False,
         )
 
 
@@ -3688,7 +3690,7 @@ class EventPropagateTest(fixtures.TestBase):
 
 
 class CollectionInitTest(fixtures.TestBase):
-    def setUp(self):
+    def setup_test(self):
         class A(object):
             pass
 
@@ -3709,10 +3711,10 @@ class CollectionInitTest(fixtures.TestBase):
         existing = a1.bs
 
         is_(state._empty_collections["bs"], existing)
-        is_not_(existing._sa_adapter, None)
+        is_not(existing._sa_adapter, None)
 
         a1.bs = []  # replaces previous "empty" collection
-        not_in_("bs", state._empty_collections)  # empty is replaced
+        not_in("bs", state._empty_collections)  # empty is replaced
         is_(existing._sa_adapter, None)
 
     def test_assert_false_on_default_value(self):
@@ -3734,7 +3736,7 @@ class CollectionInitTest(fixtures.TestBase):
         eq_(a1.__dict__["bs"], [b1, b2])
 
         old = a1.__dict__["bs"]
-        is_not_(old._sa_adapter, None)
+        is_not(old._sa_adapter, None)
         state = attributes.instance_state(a1)
 
         # this occurs during a load with populate_existing
@@ -3747,7 +3749,7 @@ class CollectionInitTest(fixtures.TestBase):
 
 
 class TestUnlink(fixtures.TestBase):
-    def setUp(self):
+    def setup_test(self):
         class A(object):
             pass
 

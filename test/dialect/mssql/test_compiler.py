@@ -1,9 +1,12 @@
 # -*- encoding: utf-8
+from sqlalchemy import bindparam
 from sqlalchemy import Column
 from sqlalchemy import Computed
 from sqlalchemy import delete
+from sqlalchemy import exc
 from sqlalchemy import extract
 from sqlalchemy import func
+from sqlalchemy import Identity
 from sqlalchemy import Index
 from sqlalchemy import insert
 from sqlalchemy import Integer
@@ -13,37 +16,60 @@ from sqlalchemy import MetaData
 from sqlalchemy import PrimaryKeyConstraint
 from sqlalchemy import schema
 from sqlalchemy import select
-from sqlalchemy import Sequence
 from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
+from sqlalchemy import text
 from sqlalchemy import union
 from sqlalchemy import UniqueConstraint
 from sqlalchemy import update
 from sqlalchemy.dialects import mssql
+from sqlalchemy.dialects.mssql import base as mssql_base
 from sqlalchemy.dialects.mssql import mxodbc
 from sqlalchemy.dialects.mssql.base import try_cast
 from sqlalchemy.sql import column
 from sqlalchemy.sql import quoted_name
 from sqlalchemy.sql import table
+from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 
+tbl = table("t", column("a"))
+
 
 class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = mssql.dialect()
+
+    @testing.fixture
+    def dialect_2012(self):
+        dialect = mssql.dialect()
+        dialect._supports_offset_fetch = True
+        return dialect
 
     def test_true_false(self):
         self.assert_compile(sql.false(), "0")
         self.assert_compile(sql.true(), "1")
 
-    def test_select(self):
-        t = table("sometable", column("somecolumn"))
+    @testing.combinations(
+        ("plain", "sometable", "sometable"),
+        ("matched_square_brackets", "colo[u]r", "[colo[u]]r]"),
+        ("unmatched_left_square_bracket", "colo[ur", "[colo[ur]"),
+        ("unmatched_right_square_bracket", "colou]r", "[colou]]r]"),
+        ("double quotes", 'Edwin "Buzz" Aldrin', '[Edwin "Buzz" Aldrin]'),
+        ("dash", "Dash-8", "[Dash-8]"),
+        ("slash", "tl/dr", "[tl/dr]"),
+        ("space", "Red Deer", "[Red Deer]"),
+        ("question mark", "OK?", "[OK?]"),
+        ("percent", "GST%", "[GST%]"),
+        id_="iaa",
+    )
+    def test_identifier_rendering(self, table_name, rendered_name):
+        t = table(table_name, column("somecolumn"))
         self.assert_compile(
-            t.select(), "SELECT sometable.somecolumn FROM sometable"
+            t.select(), "SELECT {0}.somecolumn FROM {0}".format(rendered_name)
         )
 
     def test_select_with_nolock(self):
@@ -69,7 +95,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         t = Table("sometable", m, Column("somecolumn", String))
 
         self.assert_compile(
-            select([t]).order_by(
+            select(t).order_by(
                 t.c.somecolumn.collate("Latin1_General_CS_AS_KS_WS_CI").asc()
             ),
             "SELECT sometable.somecolumn FROM sometable "
@@ -97,7 +123,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
         self.assert_compile(
             join,
-            "SELECT t1.a, t1.b, t1.c, t2.a, t2.b, t2.c "
+            "SELECT t1.a, t1.b, t1.c, t2.a AS a_1, t2.b AS b_1, t2.c AS c_1 "
             "FROM t1 WITH (NOLOCK) JOIN t2 ON t1.a = t2.a",
         )
 
@@ -267,7 +293,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "#other", meta, Column("sym", String), Column("newval", Integer)
         )
         stmt = table.update().values(
-            val=select([other.c.newval])
+            val=select(other.c.newval)
             .where(table.c.sym == other.c.sym)
             .scalar_subquery()
         )
@@ -306,7 +332,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     @testing.combinations(
         (
-            lambda: select([literal("x"), literal("y")]),
+            lambda: select(literal("x"), literal("y")),
             "SELECT [POSTCOMPILE_param_1] AS anon_1, "
             "[POSTCOMPILE_param_2] AS anon_2",
             {
@@ -315,7 +341,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             },
         ),
         (
-            lambda t: select([t]).where(t.c.foo.in_(["x", "y", "z"])),
+            lambda t: select(t).where(t.c.foo.in_(["x", "y", "z"])),
             "SELECT sometable.foo FROM sometable WHERE sometable.foo "
             "IN ([POSTCOMPILE_foo_1])",
             {
@@ -370,8 +396,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_noorderby_insubquery(self):
-        """test that the ms-sql dialect removes ORDER BY clauses from
-        subqueries"""
+        """test "no ORDER BY in subqueries unless TOP / LIMIT / OFFSET"
+        present"""
 
         table1 = table(
             "mytable",
@@ -380,13 +406,119 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             column("description", String),
         )
 
-        q = select([table1.c.myid], order_by=[table1.c.myid]).alias("foo")
+        q = select(table1.c.myid).order_by(table1.c.myid).alias("foo")
         crit = q.c.myid == table1.c.myid
         self.assert_compile(
-            select(["*"], crit),
+            select("*").where(crit),
             "SELECT * FROM (SELECT mytable.myid AS "
             "myid FROM mytable) AS foo, mytable WHERE "
             "foo.myid = mytable.myid",
+        )
+
+    def test_noorderby_insubquery_limit(self):
+        """test "no ORDER BY in subqueries unless TOP / LIMIT / OFFSET"
+        present"""
+
+        table1 = table(
+            "mytable",
+            column("myid", Integer),
+            column("name", String),
+            column("description", String),
+        )
+
+        q = (
+            select(table1.c.myid)
+            .order_by(table1.c.myid)
+            .limit(10)
+            .alias("foo")
+        )
+        crit = q.c.myid == table1.c.myid
+        self.assert_compile(
+            select("*").where(crit),
+            "SELECT * FROM (SELECT TOP [POSTCOMPILE_param_1] mytable.myid AS "
+            "myid FROM mytable ORDER BY mytable.myid) AS foo, mytable WHERE "
+            "foo.myid = mytable.myid",
+        )
+
+    def test_noorderby_insubquery_offset_oldstyle(self):
+        """test "no ORDER BY in subqueries unless TOP / LIMIT / OFFSET"
+        present"""
+
+        table1 = table(
+            "mytable",
+            column("myid", Integer),
+            column("name", String),
+            column("description", String),
+        )
+
+        q = (
+            select(table1.c.myid)
+            .order_by(table1.c.myid)
+            .offset(10)
+            .alias("foo")
+        )
+        crit = q.c.myid == table1.c.myid
+        self.assert_compile(
+            select("*").where(crit),
+            "SELECT * FROM (SELECT anon_1.myid AS myid FROM "
+            "(SELECT mytable.myid AS myid, ROW_NUMBER() OVER (ORDER BY "
+            "mytable.myid) AS mssql_rn FROM mytable) AS anon_1 "
+            "WHERE mssql_rn > :param_1) AS foo, mytable WHERE "
+            "foo.myid = mytable.myid",
+        )
+
+    def test_noorderby_insubquery_offset_newstyle(self, dialect_2012):
+        """test "no ORDER BY in subqueries unless TOP / LIMIT / OFFSET"
+        present"""
+
+        table1 = table(
+            "mytable",
+            column("myid", Integer),
+            column("name", String),
+            column("description", String),
+        )
+
+        q = (
+            select(table1.c.myid)
+            .order_by(table1.c.myid)
+            .offset(10)
+            .alias("foo")
+        )
+        crit = q.c.myid == table1.c.myid
+        self.assert_compile(
+            select("*").where(crit),
+            "SELECT * FROM (SELECT mytable.myid AS myid FROM mytable "
+            "ORDER BY mytable.myid OFFSET :param_1 ROWS) AS foo, "
+            "mytable WHERE foo.myid = mytable.myid",
+            dialect=dialect_2012,
+        )
+
+    def test_noorderby_insubquery_limit_offset_newstyle(self, dialect_2012):
+        """test "no ORDER BY in subqueries unless TOP / LIMIT / OFFSET"
+        present"""
+
+        table1 = table(
+            "mytable",
+            column("myid", Integer),
+            column("name", String),
+            column("description", String),
+        )
+
+        q = (
+            select(table1.c.myid)
+            .order_by(table1.c.myid)
+            .limit(10)
+            .offset(10)
+            .alias("foo")
+        )
+        crit = q.c.myid == table1.c.myid
+        self.assert_compile(
+            select("*").where(crit),
+            "SELECT * FROM (SELECT mytable.myid AS myid FROM mytable "
+            "ORDER BY mytable.myid OFFSET :param_1 ROWS "
+            "FETCH FIRST :param_2 ROWS ONLY) AS foo, "
+            "mytable WHERE foo.myid = mytable.myid",
+            dialect=dialect_2012,
         )
 
     def test_noorderby_parameters_insubquery(self):
@@ -400,16 +532,17 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             column("description", String),
         )
 
-        q = select(
-            [table1.c.myid, sql.literal("bar").label("c1")],
-            order_by=[table1.c.name + "-"],
-        ).alias("foo")
+        q = (
+            select(table1.c.myid, sql.literal("bar").label("c1"))
+            .order_by(table1.c.name + "-")
+            .alias("foo")
+        )
         crit = q.c.myid == table1.c.myid
         dialect = mssql.dialect()
         dialect.paramstyle = "qmark"
         dialect.positional = True
         self.assert_compile(
-            select(["*"], crit),
+            select("*").where(crit),
             "SELECT * FROM (SELECT mytable.myid AS "
             "myid, ? AS c1 FROM mytable) AS foo, mytable WHERE "
             "foo.myid = mytable.myid",
@@ -417,6 +550,42 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             checkparams={"param_1": "bar"},
             # if name_1 is included, too many parameters are passed to dbapi
             checkpositional=("bar",),
+        )
+
+    def test_schema_many_tokens_one(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            schema="abc.def.efg.hij",
+        )
+
+        # for now, we don't really know what the above means, at least
+        # don't lose the dot
+        self.assert_compile(
+            select(tbl),
+            "SELECT [abc.def.efg].hij.test.id FROM [abc.def.efg].hij.test",
+        )
+
+        dbname, owner = mssql_base._schema_elements("abc.def.efg.hij")
+        eq_(dbname, "abc.def.efg")
+        assert not isinstance(dbname, quoted_name)
+        eq_(owner, "hij")
+
+    def test_schema_many_tokens_two(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            schema="[abc].[def].[efg].[hij]",
+        )
+
+        self.assert_compile(
+            select(tbl),
+            "SELECT [abc].[def].[efg].hij.test.id "
+            "FROM [abc].[def].[efg].hij.test",
         )
 
     def test_force_schema_quoted_name_w_dot_case_insensitive(self):
@@ -428,7 +597,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema=quoted_name("foo.dbo", True),
         )
         self.assert_compile(
-            select([tbl]), "SELECT [foo.dbo].test.id FROM [foo.dbo].test"
+            select(tbl), "SELECT [foo.dbo].test.id FROM [foo.dbo].test"
         )
 
     def test_force_schema_quoted_w_dot_case_insensitive(self):
@@ -440,7 +609,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema=quoted_name("foo.dbo", True),
         )
         self.assert_compile(
-            select([tbl]), "SELECT [foo.dbo].test.id FROM [foo.dbo].test"
+            select(tbl), "SELECT [foo.dbo].test.id FROM [foo.dbo].test"
         )
 
     def test_force_schema_quoted_name_w_dot_case_sensitive(self):
@@ -452,7 +621,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema=quoted_name("Foo.dbo", True),
         )
         self.assert_compile(
-            select([tbl]), "SELECT [Foo.dbo].test.id FROM [Foo.dbo].test"
+            select(tbl), "SELECT [Foo.dbo].test.id FROM [Foo.dbo].test"
         )
 
     def test_force_schema_quoted_w_dot_case_sensitive(self):
@@ -464,7 +633,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema="[Foo.dbo]",
         )
         self.assert_compile(
-            select([tbl]), "SELECT [Foo.dbo].test.id FROM [Foo.dbo].test"
+            select(tbl), "SELECT [Foo.dbo].test.id FROM [Foo.dbo].test"
         )
 
     def test_schema_autosplit_w_dot_case_insensitive(self):
@@ -476,7 +645,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema="foo.dbo",
         )
         self.assert_compile(
-            select([tbl]), "SELECT foo.dbo.test.id FROM foo.dbo.test"
+            select(tbl), "SELECT foo.dbo.test.id FROM foo.dbo.test"
         )
 
     def test_schema_autosplit_w_dot_case_sensitive(self):
@@ -488,7 +657,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema="Foo.dbo",
         )
         self.assert_compile(
-            select([tbl]), "SELECT [Foo].dbo.test.id FROM [Foo].dbo.test"
+            select(tbl), "SELECT [Foo].dbo.test.id FROM [Foo].dbo.test"
         )
 
     def test_delete_schema(self):
@@ -503,7 +672,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             tbl.delete(tbl.c.id == 1),
             "DELETE FROM paj.test WHERE paj.test.id = " ":id_1",
         )
-        s = select([tbl.c.id]).where(tbl.c.id == 1)
+        s = select(tbl.c.id).where(tbl.c.id == 1)
         self.assert_compile(
             tbl.delete().where(tbl.c.id.in_(s)),
             "DELETE FROM paj.test WHERE paj.test.id IN "
@@ -523,7 +692,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             tbl.delete(tbl.c.id == 1),
             "DELETE FROM banana.paj.test WHERE " "banana.paj.test.id = :id_1",
         )
-        s = select([tbl.c.id]).where(tbl.c.id == 1)
+        s = select(tbl.c.id).where(tbl.c.id == 1)
         self.assert_compile(
             tbl.delete().where(tbl.c.id.in_(s)),
             "DELETE FROM banana.paj.test WHERE "
@@ -545,7 +714,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "DELETE FROM [banana split].paj.test WHERE "
             "[banana split].paj.test.id = :id_1",
         )
-        s = select([tbl.c.id]).where(tbl.c.id == 1)
+        s = select(tbl.c.id).where(tbl.c.id == 1)
         self.assert_compile(
             tbl.delete().where(tbl.c.id.in_(s)),
             "DELETE FROM [banana split].paj.test WHERE "
@@ -569,7 +738,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "space].test WHERE [banana split].[paj "
             "with a space].test.id = :id_1",
         )
-        s = select([tbl.c.id]).where(tbl.c.id == 1)
+        s = select(tbl.c.id).where(tbl.c.id == 1)
         self.assert_compile(
             tbl.delete().where(tbl.c.id.in_(s)),
             "DELETE FROM [banana split].[paj with a space].test "
@@ -595,12 +764,10 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             column("col4"),
         )
         s1, s2 = (
-            select(
-                [t1.c.col3.label("col3"), t1.c.col4.label("col4")],
+            select(t1.c.col3.label("col3"), t1.c.col4.label("col4")).where(
                 t1.c.col2.in_(["t1col2r1", "t1col2r2"]),
             ),
-            select(
-                [t2.c.col3.label("col3"), t2.c.col4.label("col4")],
+            select(t2.c.col3.label("col3"), t2.c.col4.label("col4")).where(
                 t2.c.col2.in_(["t2col2r2", "t2col2r3"]),
             ),
         )
@@ -639,7 +806,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "sometable", m, Column("col1", Integer), Column("col2", Integer)
         )
         self.assert_compile(
-            select([func.max(t.c.col1)]),
+            select(func.max(t.c.col1)),
             "SELECT max(sometable.col1) AS max_1 FROM " "sometable",
         )
 
@@ -652,7 +819,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         for field in "day", "month", "year":
             self.assert_compile(
-                select([extract(field, t.c.col1)]),
+                select(extract(field, t.c.col1)),
                 "SELECT DATEPART(%s, t.col1) AS anon_1 FROM t" % field,
             )
 
@@ -757,7 +924,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_using_top(self):
         t = table("t", column("x", Integer), column("y", Integer))
 
-        s = select([t]).where(t.c.x == 5).order_by(t.c.y).limit(10)
+        s = select(t).where(t.c.x == 5).order_by(t.c.y).limit(10)
 
         self.assert_compile(
             s,
@@ -769,7 +936,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_zero_using_top(self):
         t = table("t", column("x", Integer), column("y", Integer))
 
-        s = select([t]).where(t.c.x == 5).order_by(t.c.y).limit(0)
+        s = select(t).where(t.c.x == 5).order_by(t.c.y).limit(0)
 
         self.assert_compile(
             s,
@@ -784,7 +951,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_offset_using_window(self):
         t = table("t", column("x", Integer), column("y", Integer))
 
-        s = select([t]).where(t.c.x == 5).order_by(t.c.y).offset(20)
+        s = select(t).where(t.c.x == 5).order_by(t.c.y).offset(20)
 
         # test that the select is not altered with subsequent compile
         # calls
@@ -806,7 +973,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         t = table("t", column("x", Integer), column("y", Integer))
 
         s = (
-            select([t])
+            select(t)
             .where(t.c.x == 5)
             .order_by(t.c.y)
             .limit(10)
@@ -827,7 +994,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_offset_using_window(self):
         t = table("t", column("x", Integer), column("y", Integer))
 
-        s = select([t]).where(t.c.x == 5).order_by(t.c.y).limit(10).offset(20)
+        s = select(t).where(t.c.x == 5).order_by(t.c.y).limit(10).offset(20)
 
         self.assert_compile(
             s,
@@ -840,6 +1007,26 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             checkparams={"param_1": 20, "param_2": 10, "x_1": 5},
         )
         c = s.compile(dialect=mssql.dialect())
+        eq_(len(c._result_columns), 2)
+        assert t.c.x in set(c._create_result_map()["x"][1])
+        assert t.c.y in set(c._create_result_map()["y"][1])
+
+    def test_limit_offset_using_offset_fetch(self, dialect_2012):
+        t = table("t", column("x", Integer), column("y", Integer))
+        s = select(t).where(t.c.x == 5).order_by(t.c.y).limit(10).offset(20)
+
+        self.assert_compile(
+            s,
+            "SELECT t.x, t.y "
+            "FROM t "
+            "WHERE t.x = :x_1 ORDER BY t.y "
+            "OFFSET :param_1 ROWS "
+            "FETCH FIRST :param_2 ROWS ONLY",
+            checkparams={"param_1": 20, "param_2": 10, "x_1": 5},
+            dialect=dialect_2012,
+        )
+
+        c = s.compile(dialect=dialect_2012)
         eq_(len(c._result_columns), 2)
         assert t.c.x in set(c._create_result_map()["x"][1])
         assert t.c.y in set(c._create_result_map()["y"][1])
@@ -872,9 +1059,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         t1 = table("t1", column("x", Integer), column("y", Integer))
         t2 = table("t2", column("x", Integer), column("y", Integer))
 
-        order_by = select([t2.c.y]).where(t1.c.x == t2.c.x).scalar_subquery()
+        order_by = select(t2.c.y).where(t1.c.x == t2.c.x).scalar_subquery()
         s = (
-            select([t1])
+            select(t1)
             .where(t1.c.x == 5)
             .order_by(order_by)
             .limit(10)
@@ -907,8 +1094,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         expr1 = func.foo(t.c.x).label("x")
         expr2 = func.foo(t.c.x).label("y")
 
-        stmt1 = select([expr1]).order_by(expr1.desc()).offset(1)
-        stmt2 = select([expr2]).order_by(expr2.desc()).offset(1)
+        stmt1 = select(expr1).order_by(expr1.desc()).offset(1)
+        stmt2 = select(expr2).order_by(expr2.desc()).offset(1)
 
         self.assert_compile(
             stmt1,
@@ -927,7 +1114,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_limit_zero_offset_using_window(self):
         t = table("t", column("x", Integer), column("y", Integer))
 
-        s = select([t]).where(t.c.x == 5).order_by(t.c.y).limit(0).offset(0)
+        s = select(t).where(t.c.x == 5).order_by(t.c.y).limit(0).offset(0)
 
         # render the LIMIT of zero, but not the OFFSET
         # of zero, so produces TOP 0
@@ -937,142 +1124,6 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "WHERE t.x = :x_1 ORDER BY t.y",
             checkparams={"x_1": 5, "param_1": 0},
         )
-
-    def test_primary_key_no_identity(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column("id", Integer, autoincrement=False, primary_key=True),
-        )
-        self.assert_compile(
-            schema.CreateTable(tbl),
-            "CREATE TABLE test (id INTEGER NOT NULL, " "PRIMARY KEY (id))",
-        )
-
-    def test_primary_key_defaults_to_identity(self):
-        metadata = MetaData()
-        tbl = Table("test", metadata, Column("id", Integer, primary_key=True))
-        self.assert_compile(
-            schema.CreateTable(tbl),
-            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(1,1), "
-            "PRIMARY KEY (id))",
-        )
-
-    def test_identity_no_primary_key(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test", metadata, Column("id", Integer, autoincrement=True)
-        )
-        self.assert_compile(
-            schema.CreateTable(tbl),
-            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(1,1)" ")",
-        )
-
-    def test_identity_separate_from_primary_key(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column("id", Integer, autoincrement=False, primary_key=True),
-            Column("x", Integer, autoincrement=True),
-        )
-        self.assert_compile(
-            schema.CreateTable(tbl),
-            "CREATE TABLE test (id INTEGER NOT NULL, "
-            "x INTEGER NOT NULL IDENTITY(1,1), "
-            "PRIMARY KEY (id))",
-        )
-
-    def test_identity_illegal_two_autoincrements(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column("id", Integer, autoincrement=True),
-            Column("id2", Integer, autoincrement=True),
-        )
-        # this will be rejected by the database, just asserting this is what
-        # the two autoincrements will do right now
-        self.assert_compile(
-            schema.CreateTable(tbl),
-            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(1,1), "
-            "id2 INTEGER NOT NULL IDENTITY(1,1))",
-        )
-
-    def test_identity_start_0(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column("id", Integer, mssql_identity_start=0, primary_key=True),
-        )
-        self.assert_compile(
-            schema.CreateTable(tbl),
-            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(0,1), "
-            "PRIMARY KEY (id))",
-        )
-
-    def test_identity_increment_5(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column(
-                "id", Integer, mssql_identity_increment=5, primary_key=True
-            ),
-        )
-        self.assert_compile(
-            schema.CreateTable(tbl),
-            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(1,5), "
-            "PRIMARY KEY (id))",
-        )
-
-    def test_sequence_start_0(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column("id", Integer, Sequence("", 0), primary_key=True),
-        )
-        with testing.expect_deprecated(
-            "Use of Sequence with SQL Server in order to affect "
-        ):
-            self.assert_compile(
-                schema.CreateTable(tbl),
-                "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(0,1), "
-                "PRIMARY KEY (id))",
-            )
-
-    def test_sequence_non_primary_key(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column("id", Integer, Sequence("", start=5), primary_key=False),
-        )
-        with testing.expect_deprecated(
-            "Use of Sequence with SQL Server in order to affect "
-        ):
-            self.assert_compile(
-                schema.CreateTable(tbl),
-                "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(5,1))",
-            )
-
-    def test_sequence_ignore_nullability(self):
-        metadata = MetaData()
-        tbl = Table(
-            "test",
-            metadata,
-            Column("id", Integer, Sequence("", start=5), nullable=True),
-        )
-        with testing.expect_deprecated(
-            "Use of Sequence with SQL Server in order to affect "
-        ):
-            self.assert_compile(
-                schema.CreateTable(tbl),
-                "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(5,1))",
-            )
 
     def test_table_pkc_clustering(self):
         metadata = MetaData()
@@ -1167,6 +1218,12 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "CREATE INDEX test_idx_data_1 ON test (data) WHERE data > 1",
         )
 
+        idx = Index("test_idx_data_1", tbl.c.data, mssql_where="data > 1")
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX test_idx_data_1 ON test (data) WHERE data > 1",
+        )
+
     def test_index_ordering(self):
         metadata = MetaData()
         tbl = Table(
@@ -1225,12 +1282,37 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             schema.CreateIndex(idx), "CREATE INDEX foo ON test (x) INCLUDE (y)"
         )
 
+    def test_index_include_where(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("x", Integer),
+            Column("y", Integer),
+            Column("z", Integer),
+        )
+        idx = Index(
+            "foo", tbl.c.x, mssql_include=[tbl.c.y], mssql_where=tbl.c.y > 1
+        )
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX foo ON test (x) INCLUDE (y) WHERE y > 1",
+        )
+
+        idx = Index(
+            "foo", tbl.c.x, mssql_include=[tbl.c.y], mssql_where=text("y > 1")
+        )
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX foo ON test (x) INCLUDE (y) WHERE y > 1",
+        )
+
     def test_try_cast(self):
         metadata = MetaData()
         t1 = Table("t1", metadata, Column("id", Integer, primary_key=True))
 
         self.assert_compile(
-            select([try_cast(t1.c.id, Integer)]),
+            select(try_cast(t1.c.id, Integer)),
             "SELECT TRY_CAST (t1.id AS INTEGER) AS id FROM t1",
         )
 
@@ -1255,9 +1337,484 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "CREATE TABLE t (x INTEGER NULL, y AS (x + 2)%s)" % text,
         )
 
+    @testing.combinations(
+        (
+            5,
+            10,
+            {},
+            "OFFSET :param_1 ROWS FETCH FIRST :param_2 ROWS ONLY",
+            {"param_1": 10, "param_2": 5},
+        ),
+        (None, 10, {}, "OFFSET :param_1 ROWS", {"param_1": 10}),
+        (
+            5,
+            None,
+            {},
+            "OFFSET 0 ROWS FETCH FIRST :param_1 ROWS ONLY",
+            {"param_1": 5},
+        ),
+        (
+            0,
+            0,
+            {},
+            "OFFSET :param_1 ROWS FETCH FIRST :param_2 ROWS ONLY",
+            {"param_1": 0, "param_2": 0},
+        ),
+        (
+            5,
+            0,
+            {"percent": True},
+            "TOP [POSTCOMPILE_param_1] PERCENT",
+            {"param_1": 5},
+        ),
+        (
+            5,
+            None,
+            {"percent": True, "with_ties": True},
+            "TOP [POSTCOMPILE_param_1] PERCENT WITH TIES",
+            {"param_1": 5},
+        ),
+        (
+            5,
+            0,
+            {"with_ties": True},
+            "TOP [POSTCOMPILE_param_1] WITH TIES",
+            {"param_1": 5},
+        ),
+        (
+            literal_column("Q"),
+            literal_column("Y"),
+            {},
+            "OFFSET Y ROWS FETCH FIRST Q ROWS ONLY",
+            {},
+        ),
+        (
+            column("Q"),
+            column("Y"),
+            {},
+            "OFFSET [Y] ROWS FETCH FIRST [Q] ROWS ONLY",
+            {},
+        ),
+        (
+            bindparam("Q", 3),
+            bindparam("Y", 7),
+            {},
+            "OFFSET :Y ROWS FETCH FIRST :Q ROWS ONLY",
+            {"Q": 3, "Y": 7},
+        ),
+        (
+            literal_column("Q") + literal_column("Z"),
+            literal_column("Y") + literal_column("W"),
+            {},
+            "OFFSET Y + W ROWS FETCH FIRST Q + Z ROWS ONLY",
+            {},
+        ),
+        argnames="fetch, offset, fetch_kw, exp, params",
+    )
+    def test_fetch(self, dialect_2012, fetch, offset, fetch_kw, exp, params):
+        t = table("t", column("a"))
+        if "TOP" in exp:
+            sel = "SELECT %s t.a FROM t ORDER BY t.a" % exp
+        else:
+            sel = "SELECT t.a FROM t ORDER BY t.a " + exp
+
+        self.assert_compile(
+            select(t).order_by(t.c.a).fetch(fetch, **fetch_kw).offset(offset),
+            sel,
+            checkparams=params,
+            dialect=dialect_2012,
+        )
+
+    @testing.combinations(
+        (
+            5,
+            10,
+            {},
+            "mssql_rn > :param_1 AND mssql_rn <= :param_2 + :param_1",
+            {"param_1": 10, "param_2": 5},
+        ),
+        (None, 10, {}, "mssql_rn > :param_1", {"param_1": 10}),
+        (
+            5,
+            None,
+            {},
+            "mssql_rn <= :param_1",
+            {"param_1": 5},
+        ),
+        (
+            0,
+            0,
+            {},
+            "mssql_rn > :param_1 AND mssql_rn <= :param_2 + :param_1",
+            {"param_1": 0, "param_2": 0},
+        ),
+        (
+            5,
+            0,
+            {"percent": True},
+            "TOP [POSTCOMPILE_param_1] PERCENT",
+            {"param_1": 5},
+        ),
+        (
+            5,
+            None,
+            {"percent": True, "with_ties": True},
+            "TOP [POSTCOMPILE_param_1] PERCENT WITH TIES",
+            {"param_1": 5},
+        ),
+        (
+            5,
+            0,
+            {"with_ties": True},
+            "TOP [POSTCOMPILE_param_1] WITH TIES",
+            {"param_1": 5},
+        ),
+        (
+            literal_column("Q"),
+            literal_column("Y"),
+            {},
+            "mssql_rn > Y AND mssql_rn <= Q + Y",
+            {},
+        ),
+        (
+            column("Q"),
+            column("Y"),
+            {},
+            "mssql_rn > [Y] AND mssql_rn <= [Q] + [Y]",
+            {},
+        ),
+        (
+            bindparam("Q", 3),
+            bindparam("Y", 7),
+            {},
+            "mssql_rn > :Y AND mssql_rn <= :Q + :Y",
+            {"Q": 3, "Y": 7},
+        ),
+        (
+            literal_column("Q") + literal_column("Z"),
+            literal_column("Y") + literal_column("W"),
+            {},
+            "mssql_rn > Y + W AND mssql_rn <= Q + Z + Y + W",
+            {},
+        ),
+        argnames="fetch, offset, fetch_kw, exp, params",
+    )
+    def test_fetch_old_version(self, fetch, offset, fetch_kw, exp, params):
+        t = table("t", column("a"))
+        if "TOP" in exp:
+            sel = "SELECT %s t.a FROM t ORDER BY t.a" % exp
+        else:
+            sel = (
+                "SELECT anon_1.a FROM (SELECT t.a AS a, ROW_NUMBER() "
+                "OVER (ORDER BY t.a) AS mssql_rn FROM t) AS anon_1 WHERE "
+                + exp
+            )
+
+        self.assert_compile(
+            select(t).order_by(t.c.a).fetch(fetch, **fetch_kw).offset(offset),
+            sel,
+            checkparams=params,
+        )
+
+    _no_offset = (
+        "MSSQL needs TOP to use PERCENT and/or WITH TIES. "
+        "Only simple fetch without offset can be used."
+    )
+
+    _order_by = (
+        "MSSQL requires an order_by when using an OFFSET "
+        "or a non-simple LIMIT clause"
+    )
+
+    @testing.combinations(
+        (
+            select(tbl).order_by(tbl.c.a).fetch(5, percent=True).offset(3),
+            _no_offset,
+        ),
+        (
+            select(tbl).order_by(tbl.c.a).fetch(5, with_ties=True).offset(3),
+            _no_offset,
+        ),
+        (
+            select(tbl)
+            .order_by(tbl.c.a)
+            .fetch(5, percent=True, with_ties=True)
+            .offset(3),
+            _no_offset,
+        ),
+        (
+            select(tbl)
+            .order_by(tbl.c.a)
+            .fetch(bindparam("x"), with_ties=True),
+            _no_offset,
+        ),
+        (select(tbl).fetch(5).offset(3), _order_by),
+        (select(tbl).fetch(5), _order_by),
+        (select(tbl).offset(5), _order_by),
+        argnames="stmt, error",
+    )
+    def test_row_limit_compile_error(self, dialect_2012, stmt, error):
+        with testing.expect_raises_message(exc.CompileError, error):
+            print(stmt.compile(dialect=dialect_2012))
+        with testing.expect_raises_message(exc.CompileError, error):
+            print(stmt.compile(dialect=self.__dialect__))
+
+
+class CompileIdentityTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = mssql.dialect()
+
+    def assert_compile_with_warning(self, *args, **kwargs):
+        with testing.expect_deprecated(
+            "The dialect options 'mssql_identity_start' and "
+            "'mssql_identity_increment' are deprecated. "
+            "Use the 'Identity' object instead."
+        ):
+            return self.assert_compile(*args, **kwargs)
+
+    def test_primary_key_no_identity(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, autoincrement=False, primary_key=True),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL, PRIMARY KEY (id))",
+        )
+
+    def test_primary_key_defaults_to_identity(self):
+        metadata = MetaData()
+        tbl = Table("test", metadata, Column("id", Integer, primary_key=True))
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY, "
+            "PRIMARY KEY (id))",
+        )
+
+    def test_primary_key_with_identity_object(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column(
+                "id",
+                Integer,
+                Identity(start=3, increment=42),
+                primary_key=True,
+            ),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(3,42), "
+            "PRIMARY KEY (id))",
+        )
+
+    def test_identity_no_primary_key(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test", metadata, Column("id", Integer, autoincrement=True)
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY)",
+        )
+
+    def test_identity_object_no_primary_key(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, Identity(increment=42)),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(1,42))",
+        )
+
+    def test_identity_object_1_1(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, Identity(start=1, increment=1)),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(1,1))",
+        )
+
+    def test_identity_object_no_primary_key_non_nullable(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column(
+                "id",
+                Integer,
+                Identity(start=3),
+                nullable=False,
+            ),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(3,1)" ")",
+        )
+
+    def test_identity_separate_from_primary_key(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, autoincrement=False, primary_key=True),
+            Column("x", Integer, autoincrement=True),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL, "
+            "x INTEGER NOT NULL IDENTITY, "
+            "PRIMARY KEY (id))",
+        )
+
+    def test_identity_object_separate_from_primary_key(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, autoincrement=False, primary_key=True),
+            Column(
+                "x",
+                Integer,
+                Identity(start=3, increment=42),
+            ),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL, "
+            "x INTEGER NOT NULL IDENTITY(3,42), "
+            "PRIMARY KEY (id))",
+        )
+
+    def test_identity_illegal_two_autoincrements(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, autoincrement=True),
+            Column("id2", Integer, autoincrement=True),
+        )
+        # this will be rejected by the database, just asserting this is what
+        # the two autoincrements will do right now
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY, "
+            "id2 INTEGER NOT NULL IDENTITY)",
+        )
+
+    def test_identity_object_illegal_two_autoincrements(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column(
+                "id",
+                Integer,
+                Identity(start=3, increment=42),
+                autoincrement=True,
+            ),
+            Column(
+                "id2",
+                Integer,
+                Identity(start=7, increment=2),
+            ),
+        )
+        # this will be rejected by the database, just asserting this is what
+        # the two autoincrements will do right now
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(3,42), "
+            "id2 INTEGER NOT NULL IDENTITY(7,2))",
+        )
+
+    def test_identity_start_0(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, mssql_identity_start=0, primary_key=True),
+        )
+        self.assert_compile_with_warning(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(0,1), "
+            "PRIMARY KEY (id))",
+        )
+
+    def test_identity_increment_5(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column(
+                "id", Integer, mssql_identity_increment=5, primary_key=True
+            ),
+        )
+        self.assert_compile_with_warning(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY(1,5), "
+            "PRIMARY KEY (id))",
+        )
+
+    @testing.combinations(
+        schema.CreateTable(
+            Table(
+                "test",
+                MetaData(),
+                Column(
+                    "id",
+                    Integer,
+                    Identity(start=2, increment=2),
+                    mssql_identity_start=0,
+                ),
+            )
+        ),
+        schema.CreateTable(
+            Table(
+                "test1",
+                MetaData(),
+                Column(
+                    "id2",
+                    Integer,
+                    Identity(start=3, increment=3),
+                    mssql_identity_increment=5,
+                ),
+            )
+        ),
+    )
+    def test_identity_options_ignored_with_identity_object(self, create_table):
+        assert_raises_message(
+            exc.CompileError,
+            "Cannot specify options 'mssql_identity_start' and/or "
+            "'mssql_identity_increment' while also using the "
+            "'Identity' construct.",
+            create_table.compile,
+            dialect=self.__dialect__,
+        )
+
+    def test_identity_object_no_options(self):
+        metadata = MetaData()
+        tbl = Table(
+            "test",
+            metadata,
+            Column("id", Integer, Identity()),
+        )
+        self.assert_compile(
+            schema.CreateTable(tbl),
+            "CREATE TABLE test (id INTEGER NOT NULL IDENTITY)",
+        )
+
 
 class SchemaTest(fixtures.TestBase):
-    def setup(self):
+    def setup_test(self):
         t = Table(
             "sometable",
             MetaData(),

@@ -1,5 +1,5 @@
 # testing/profiling.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -17,12 +17,11 @@ import contextlib
 import os
 import platform
 import pstats
+import re
 import sys
 
 from . import config
 from .util import gc_collect
-from ..util import cpython
-from ..util import win32
 
 
 try:
@@ -56,7 +55,7 @@ def _start_current_test(id_):
 
 
 class ProfileStatsFile(object):
-    """"Store per-platform/fn profiling results in a file.
+    """Store per-platform/fn profiling results in a file.
 
     There was no json module available when this was written, but now
     the file format which is very deterministically line oriented is kind of
@@ -64,7 +63,7 @@ class ProfileStatsFile(object):
 
     """
 
-    def __init__(self, filename, sort="cumulative"):
+    def __init__(self, filename, sort="cumulative", dump=None):
         self.force_write = (
             config.options is not None and config.options.force_write_profiles
         )
@@ -76,6 +75,7 @@ class ProfileStatsFile(object):
         self.data = collections.defaultdict(
             lambda: collections.defaultdict(dict)
         )
+        self.dump = dump
         self.sort = sort
         self._read()
         if self.write:
@@ -88,17 +88,22 @@ class ProfileStatsFile(object):
 
         dbapi_key = config.db.name + "_" + config.db.driver
 
+        if config.db.name == "sqlite" and config.db.dialect._is_url_file_db(
+            config.db.url
+        ):
+            dbapi_key += "_file"
+
         # keep it at 2.7, 3.1, 3.2, etc. for now.
         py_version = ".".join([str(v) for v in sys.version_info[0:2]])
 
-        if not cpython:
-            platform_tokens = [platform.python_implementation(), py_version]
-        else:
-            platform_tokens = [py_version]
-        platform_tokens.append(dbapi_key)
+        platform_tokens = [
+            platform.machine(),
+            platform.system().lower(),
+            platform.python_implementation().lower(),
+            py_version,
+            dbapi_key,
+        ]
 
-        if win32:
-            platform_tokens.append("win")
         platform_tokens.append(
             "nativeunicode"
             if config.db.dialect.convert_unicode
@@ -220,7 +225,7 @@ class ProfileStatsFile(object):
         profile_f.close()
 
 
-def function_call_count(variance=0.05, times=1):
+def function_call_count(variance=0.05, times=1, warmup=0):
     """Assert a target for a test case's function call count.
 
     The main purpose of this assertion is to detect changes in
@@ -231,19 +236,31 @@ def function_call_count(variance=0.05, times=1):
 
     """
 
-    # use signature-rewriting decorator function so that py.test fixtures
+    # use signature-rewriting decorator function so that pytest fixtures
     # still work on py27.  In Py3, update_wrapper() alone is good enough,
     # likely due to the introduction of __signature__.
 
     from sqlalchemy.util import decorator
+    from sqlalchemy.util import deprecations
+    from sqlalchemy.engine import row
+    from sqlalchemy.testing import mock
 
     @decorator
     def wrap(fn, *args, **kw):
-        timerange = range(times)
-        with count_functions(variance=variance):
-            for time in timerange:
-                rv = fn(*args, **kw)
-            return rv
+
+        with mock.patch.object(
+            deprecations, "SQLALCHEMY_WARN_20", False
+        ), mock.patch.object(
+            row.LegacyRow, "_default_key_style", row.KEY_OBJECTS_NO_WARN
+        ):
+            for warm in range(warmup):
+                fn(*args, **kw)
+
+            timerange = range(times)
+            with count_functions(variance=variance):
+                for time in timerange:
+                    rv = fn(*args, **kw)
+                return rv
 
     return wrap
 
@@ -284,9 +301,15 @@ def count_functions(variance=0.05):
         line_no, expected_count = expected
 
     print(("Pstats calls: %d Expected %s" % (callcount, expected_count)))
-    stats.sort_stats(_profile_stats.sort)
+    stats.sort_stats(*re.split(r"[, ]", _profile_stats.sort))
     stats.print_stats()
-
+    if _profile_stats.dump:
+        base, ext = os.path.splitext(_profile_stats.dump)
+        test_name = _current_test.split(".")[-1]
+        dumpfile = "%s_%s%s" % (base, test_name, ext or ".profile")
+        stats.dump_stats(dumpfile)
+        print("Dumped stats to file %s" % dumpfile)
+    # stats.print_callers()
     if _profile_stats.force_write:
         _profile_stats.replace(callcount)
     elif expected_count:

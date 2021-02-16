@@ -7,10 +7,13 @@ from sqlalchemy import literal_column
 from sqlalchemy import MetaData
 from sqlalchemy import Numeric
 from sqlalchemy import select
+from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import table
+from sqlalchemy import testing
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.compiler import deregister
+from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.schema import DDLElement
@@ -18,6 +21,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.expression import BindParameter
 from sqlalchemy.sql.expression import ClauseElement
 from sqlalchemy.sql.expression import ColumnClause
+from sqlalchemy.sql.expression import Executable
 from sqlalchemy.sql.expression import FunctionElement
 from sqlalchemy.sql.expression import Select
 from sqlalchemy.sql.sqltypes import NULLTYPE
@@ -41,11 +45,11 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             return ">>%s<<" % thingy.name
 
         self.assert_compile(
-            select([column("foo"), MyThingy()]), "SELECT foo, >>MYTHINGY!<<"
+            select(column("foo"), MyThingy()), "SELECT foo, >>MYTHINGY!<<"
         )
 
         self.assert_compile(
-            select([MyThingy("x"), MyThingy("y")]).where(MyThingy() == 5),
+            select(MyThingy("x"), MyThingy("y")).where(MyThingy() == 5),
             "SELECT >>x<<, >>y<< WHERE >>MYTHINGY!<< = :MYTHINGY!_1",
         )
 
@@ -103,12 +107,12 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             return str(compiler.counter)
 
         self.assert_compile(
-            select([column("foo"), MyThingy()]).order_by(desc(MyThingy())),
+            select(column("foo"), MyThingy()).order_by(desc(MyThingy())),
             "SELECT foo, 1 ORDER BY 2 DESC",
         )
 
         self.assert_compile(
-            select([MyThingy(), MyThingy()]).where(MyThingy() == 5),
+            select(MyThingy(), MyThingy()).where(MyThingy() == 5),
             "SELECT 1, 2 WHERE 3 = :MYTHINGY!_1",
         )
 
@@ -127,7 +131,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
 
         t1 = table("mytable", column("x"), column("y"), column("z"))
         self.assert_compile(
-            InsertFromSelect(t1, select([t1]).where(t1.c.x > 5)),
+            InsertFromSelect(t1, select(t1).where(t1.c.x > 5)),
             "INSERT INTO mytable (SELECT mytable.x, mytable.y, mytable.z "
             "FROM mytable WHERE mytable.x > :x_1)",
         )
@@ -151,12 +155,32 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             return "mythingy"
 
         assert_raises_message(
-            exc.CompileError,
+            exc.UnsupportedCompilationError,
             "<class 'test.ext.test_compiler..*MyThingy'> "
             "construct has no default compilation handler.",
             str,
             MyThingy(),
         )
+
+    def test_no_default_proxy_generation(self):
+        class my_function(FunctionElement):
+            name = "my_function"
+            type = Numeric()
+
+        @compiles(my_function, "sqlite")
+        def sqlite_my_function(element, compiler, **kw):
+            return "my_function(%s)" % compiler.process(element.clauses, **kw)
+
+        t1 = table("t1", column("q"))
+        stmt = select(my_function(t1.c.q))
+
+        self.assert_compile(
+            stmt,
+            "SELECT my_function(t1.q) AS my_function_1 FROM t1",
+            dialect="sqlite",
+        )
+
+        eq_(stmt.selected_columns.keys(), [stmt._raw_columns[0].anon_label])
 
     def test_no_default_message(self):
         class MyThingy(ClauseElement):
@@ -167,7 +191,8 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             return "mythingy"
 
         assert_raises_message(
-            exc.CompileError,
+            exc.UnsupportedCompilationError,
+            "Compiler .*StrSQLCompiler.* can't .* "
             "<class 'test.ext.test_compiler..*MyThingy'> "
             "construct has no default compilation handler.",
             str,
@@ -203,7 +228,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             def compile_(element, compiler, **kw):
                 return "OVERRIDE"
 
-            s1 = select([t1])
+            s1 = select(t1)
             self.assert_compile(s1, "OVERRIDE")
             self.assert_compile(s1._annotate({}), "OVERRIDE")
         finally:
@@ -341,7 +366,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             return "FOO" + element.name
 
         self.assert_compile(
-            select([Sub1(), Sub2()]),
+            select(Sub1(), Sub2()),
             "SELECT FOOsub1 AS sub1_1, sub2 AS sub2_1",
             use_default_dialect=True,
         )
@@ -364,7 +389,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             name = "subsub1"
 
         self.assert_compile(
-            select([Sub1(), Sub2(), SubSub1()]),
+            select(Sub1(), Sub2(), SubSub1()),
             "SELECT sub1 AS sub1_1, sub2 AS sub2_1, subsub1 AS subsub1_1",
             use_default_dialect=True,
         )
@@ -374,7 +399,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             return "FOO" + element.name
 
         self.assert_compile(
-            select([Sub1(), Sub2(), SubSub1()]),
+            select(Sub1(), Sub2(), SubSub1()),
             "SELECT FOOsub1 AS sub1_1, sub2 AS sub2_1, "
             "FOOsubsub1 AS subsub1_1",
             use_default_dialect=True,
@@ -383,7 +408,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
     def _test_result_map_population(self, expression):
         lc1 = literal_column("1")
         lc2 = literal_column("2")
-        stmt = select([lc1, expression, lc2])
+        stmt = select(lc1, expression, lc2)
 
         compiled = stmt.compile()
         eq_(
@@ -426,7 +451,7 @@ class DefaultOnExistingTest(fixtures.TestBase, AssertsCompiledSQL):
 
     __dialect__ = "default"
 
-    def teardown(self):
+    def teardown_test(self):
         for cls in (Select, BindParameter):
             deregister(cls)
 
@@ -437,7 +462,7 @@ class DefaultOnExistingTest(fixtures.TestBase, AssertsCompiledSQL):
         def compile_(element, compiler, **kw):
             return "OVERRIDE"
 
-        s1 = select([t1])
+        s1 = select(t1)
         self.assert_compile(s1, "SELECT t1.c1, t1.c2 FROM t1")
 
         from sqlalchemy.dialects.sqlite import base as sqlite
@@ -470,3 +495,72 @@ class DefaultOnExistingTest(fixtures.TestBase, AssertsCompiledSQL):
             {"a": 1, "b": 2},
             use_default_dialect=True,
         )
+
+
+class ExecuteTest(fixtures.TablesTest):
+    """test that Executable constructs work at a rudimentary level."""
+
+    __requires__ = ("standard_cursor_sql",)
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "some_table",
+            metadata,
+            Column("id", Integer, primary_key=True, autoincrement=False),
+            Column("data", String(50)),
+        )
+
+    @testing.fixture()
+    def insert_fixture(self):
+        class MyInsert(Executable, ClauseElement):
+            pass
+
+        @compiles(MyInsert)
+        def _run_myinsert(element, compiler, **kw):
+            return "INSERT INTO some_table (id, data) VALUES(1, 'some data')"
+
+        return MyInsert
+
+    @testing.fixture()
+    def select_fixture(self):
+        class MySelect(Executable, ClauseElement):
+            pass
+
+        @compiles(MySelect)
+        def _run_myinsert(element, compiler, **kw):
+            return "SELECT id, data FROM some_table"
+
+        return MySelect
+
+    def test_insert(self, connection, insert_fixture):
+        connection.execute(insert_fixture())
+
+        some_table = self.tables.some_table
+        eq_(connection.scalar(select(some_table.c.data)), "some data")
+
+    def test_insert_session(self, connection, insert_fixture):
+        with Session(connection) as session:
+            session.execute(insert_fixture())
+
+        some_table = self.tables.some_table
+
+        eq_(connection.scalar(select(some_table.c.data)), "some data")
+
+    def test_select(self, connection, select_fixture):
+        some_table = self.tables.some_table
+
+        connection.execute(some_table.insert().values(id=1, data="some data"))
+        result = connection.execute(select_fixture())
+
+        eq_(result.first(), (1, "some data"))
+
+    def test_select_session(self, connection, select_fixture):
+        some_table = self.tables.some_table
+
+        connection.execute(some_table.insert().values(id=1, data="some data"))
+
+        with Session(connection) as session:
+            result = session.execute(select_fixture())
+
+            eq_(result.first(), (1, "some data"))

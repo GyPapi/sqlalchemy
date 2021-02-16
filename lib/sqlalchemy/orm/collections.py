@@ -1,5 +1,5 @@
 # orm/collections.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -270,10 +270,13 @@ def attribute_mapped_collection(attr_name):
     'attr_name' attribute of entities in the collection, where ``attr_name``
     is the string name of the attribute.
 
-    The key value must be immutable for the lifetime of the object.  You
-    can not, for example, map on foreign key values if those key values will
-    change during the session, i.e. from None to a database-assigned integer
-    after a session flush.
+    .. warning:: the key value must be assigned to its final value
+       **before** it is accessed by the attribute mapped collection.
+       Additionally, changes to the key attribute are **not tracked**
+       automatically, which means the key in the dictionary is not
+       automatically synchronized with the key value on the target object
+       itself.  See the section :ref:`key_collections_mutations`
+       for an example.
 
     """
     getter = _SerializableAttrGetter(attr_name)
@@ -301,7 +304,7 @@ class collection(object):
 
     The decorators fall into two groups: annotations and interception recipes.
 
-    The annotating decorators (appender, remover, iterator, linker, converter,
+    The annotating decorators (appender, remover, iterator, converter,
     internally_instrumented) indicate the method's purpose and take no
     arguments.  They are not written with parens::
 
@@ -427,36 +430,6 @@ class collection(object):
         """
         fn._sa_instrumented = True
         return fn
-
-    @staticmethod
-    @util.deprecated(
-        "1.0",
-        "The :meth:`.collection.linker` handler is deprecated and will "
-        "be removed in a future release.  Please refer to the "
-        ":meth:`.AttributeEvents.init_collection` "
-        "and :meth:`.AttributeEvents.dispose_collection` event handlers. ",
-    )
-    def linker(fn):
-        """Tag the method as a "linked to attribute" event handler.
-
-        This optional event handler will be called when the collection class
-        is linked to or unlinked from the InstrumentedAttribute.  It is
-        invoked immediately after the '_sa_adapter' property is set on
-        the instance.  A single argument is passed: the collection adapter
-        that has been linked, or None if unlinking.
-
-
-        """
-        fn._sa_instrument_role = "linker"
-        return fn
-
-    link = linker
-    """Synonym for :meth:`.collection.linker`.
-
-    .. deprecated:: 1.0 - :meth:`.collection.link` is deprecated and will be
-       removed in a future release.
-
-    """
 
     @staticmethod
     @util.deprecated(
@@ -946,7 +919,6 @@ def _locate_roles_and_methods(cls):
                     "appender",
                     "remover",
                     "iterator",
-                    "linker",
                     "converter",
                 )
                 roles.setdefault(role, name)

@@ -2,14 +2,13 @@ from sqlalchemy import Column
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
+from sqlalchemy import select
 from sqlalchemy import Table
 from sqlalchemy import util
 from sqlalchemy.ext.hybrid import hybrid_method
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import aliased
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
-from sqlalchemy.orm import Session
 from sqlalchemy.orm import synonym
 from sqlalchemy.orm import util as orm_util
 from sqlalchemy.orm import with_polymorphic
@@ -21,6 +20,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.util import compat
 from test.orm import _fixtures
 from .inheritance import _poly_fixtures
@@ -54,6 +54,30 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
 
         assert Point.id.__clause_element__().table is table
         assert alias.id.__clause_element__().table is not table
+
+    def test_named_entity(self):
+        class Point(object):
+            pass
+
+        self._fixture(Point)
+
+        alias = aliased(Point, name="pp")
+
+        self.assert_compile(
+            select(alias), "SELECT pp.id, pp.x, pp.y FROM point AS pp"
+        )
+
+    def test_named_selectable(self):
+        class Point(object):
+            pass
+
+        table = self._fixture(Point)
+
+        alias = aliased(table, name="pp")
+
+        self.assert_compile(
+            select(alias), "SELECT pp.id, pp.x, pp.y FROM point AS pp"
+        )
 
     def test_not_instantiatable(self):
         class Point(object):
@@ -152,7 +176,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
 
         self._fixture(Point)
         alias = aliased(Point)
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.left_of(Point)),
@@ -178,7 +202,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.double_x > Point.x),
@@ -216,17 +240,19 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(
             Point.x_alone._annotations,
             {
+                "entity_namespace": point_mapper,
                 "parententity": point_mapper,
                 "parentmapper": point_mapper,
-                "orm_key": "x_alone",
+                "proxy_key": "x_alone",
             },
         )
         eq_(
             Point.x._annotations,
             {
+                "entity_namespace": point_mapper,
                 "parententity": point_mapper,
                 "parentmapper": point_mapper,
-                "orm_key": "x",
+                "proxy_key": "x",
             },
         )
 
@@ -235,7 +261,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         a2 = aliased(Point)
         eq_(str(a2.x_alone == alias.x), "point_1.x = point_2.x")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.x_alone > Point.x),
@@ -255,7 +281,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.x_syn), "Point.x_syn")
         eq_(str(alias.x_syn), "AliasedClass_Point.x_syn")
 
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(alias.x_syn).filter(alias.x_syn > Point.x_syn),
             "SELECT point_1.x AS point_1_x FROM point AS point_1, point "
@@ -294,7 +320,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         a2 = aliased(Point)
         eq_(str(a2.x_syn == alias.x), "point_1.x = point_2.x")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.x_syn > Point.x),
@@ -323,7 +349,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.double_x > Point.x),
@@ -353,7 +379,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.double_x > Point.x),
@@ -442,7 +468,7 @@ class IdentityKeyTest(_fixtures.FixtureTest):
         users, User = self.tables.users, self.classes.User
 
         mapper(User, users)
-        s = create_session()
+        s = fixture_session()
         u = User(name="u1")
         s.add(u)
         s.flush()

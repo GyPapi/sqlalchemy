@@ -2,6 +2,8 @@
 Additional Persistence Techniques
 =================================
 
+
+
 .. _flush_embedded_sql_expressions:
 
 Embedding SQL Insert/Update Expressions into a Flush
@@ -52,7 +54,7 @@ part of the object's primary key::
 
     session = Session(e)
 
-    foo = Foo(pk=sql.select([sql.func.coalesce(sql.func.max(Foo.pk) + 1, 1)])
+    foo = Foo(pk=sql.select(sql.func.coalesce(sql.func.max(Foo.pk) + 1, 1))
     session.add(foo)
     session.commit()
 
@@ -79,7 +81,7 @@ SQL expressions and strings can be executed via the
 :class:`~sqlalchemy.orm.session.Session` within its transactional context.
 This is most easily accomplished using the
 :meth:`~.Session.execute` method, which returns a
-:class:`~sqlalchemy.engine.ResultProxy` in the same manner as an
+:class:`~sqlalchemy.engine.CursorResult` in the same manner as an
 :class:`~sqlalchemy.engine.Engine` or
 :class:`~sqlalchemy.engine.Connection`::
 
@@ -90,7 +92,7 @@ This is most easily accomplished using the
     result = session.execute("select * from table where id=:id", {'id':7})
 
     # execute a SQL expression construct
-    result = session.execute(select([mytable]).where(mytable.c.id==7))
+    result = session.execute(select(mytable).where(mytable.c.id==7))
 
 The current :class:`~sqlalchemy.engine.Connection` held by the
 :class:`~sqlalchemy.orm.session.Session` is accessible using the
@@ -98,26 +100,40 @@ The current :class:`~sqlalchemy.engine.Connection` held by the
 
     connection = session.connection()
 
-The examples above deal with a :class:`~sqlalchemy.orm.session.Session` that's
-bound to a single :class:`~sqlalchemy.engine.Engine` or
-:class:`~sqlalchemy.engine.Connection`. To execute statements using a
-:class:`~sqlalchemy.orm.session.Session` which is bound either to multiple
+The examples above deal with a :class:`_orm.Session` that's
+bound to a single :class:`_engine.Engine` or
+:class:`_engine.Connection`. To execute statements using a
+:class:`_orm.Session` which is bound either to multiple
 engines, or none at all (i.e. relies upon bound metadata), both
-:meth:`~.Session.execute` and
-:meth:`~.Session.connection` accept a ``mapper`` keyword
-argument, which is passed a mapped class or
-:class:`~sqlalchemy.orm.mapper.Mapper` instance, which is used to locate the
+:meth:`_orm.Session.execute` and
+:meth:`_orm.Session.connection` accept a dictionary of bind arguments
+:paramref:`_orm.Session.execute.bind_arguments` which may include "mapper"
+which is passed a mapped class or
+:class:`_orm.Mapper` instance, which is used to locate the
 proper context for the desired engine::
 
     Session = sessionmaker()
     session = Session()
 
     # need to specify mapper or class when executing
-    result = session.execute("select * from table where id=:id", {'id':7}, mapper=MyMappedClass)
+    result = session.execute(
+        text("select * from table where id=:id"),
+        {'id':7},
+        bind_arguments={'mapper': MyMappedClass}
+    )
 
-    result = session.execute(select([mytable], mytable.c.id==7), mapper=MyMappedClass)
+    result = session.execute(
+        select(mytable).where(mytable.c.id==7),
+        bind_arguments={'mapper': MyMappedClass}
+    )
 
     connection = session.connection(MyMappedClass)
+
+.. versionchanged:: 1.4 the ``mapper`` and ``clause`` arguments to
+   :meth:`_orm.Session.execute` are now passed as part of a dictionary
+   sent as the :paramref:`_orm.Session.execute.bind_arguments` parameter.
+   The previous arguments are still accepted however this usage is
+   deprecated.
 
 .. _session_forcing_null:
 
@@ -177,7 +193,7 @@ hold as an assumption.
 So what if we want to actually put NULL into this column, even though the
 column has a default value?  There are two approaches.  One is that
 on a per-instance level, we assign the attribute using the
-:obj:`~.expression.null` SQL construct::
+:obj:`_expression.null` SQL construct::
 
     from sqlalchemy import null
 
@@ -188,7 +204,7 @@ on a per-instance level, we assign the attribute using the
                       # and server-side defaults, and the database will
                       # persist this as the NULL value
 
-The :obj:`~.expression.null` SQL construct always translates into the SQL
+The :obj:`_expression.null` SQL construct always translates into the SQL
 NULL value being directly present in the target INSERT statement.
 
 If we'd like to be able to use the Python value ``None`` and have this
@@ -245,11 +261,11 @@ SQLAlchemy Core supports a method of retrieving these primary key values which
 is often native to the Python DBAPI, and in general this process is automatic,
 with the exception of a database like Oracle that requires us to specify a
 :class:`.Sequence` explicitly.   There is more documentation regarding this
-at :paramref:`.Column.autoincrement`.
+at :paramref:`_schema.Column.autoincrement`.
 
 For server-generating columns that are not primary key columns or that are not
 simple autoincrementing integer columns, the ORM requires that these columns
-are marked with an appropriate server_default directive that allows the ORM to
+are marked with an appropriate ``server_default`` directive that allows the ORM to
 retrieve this value.   Not all methods are supported on all backends, however,
 so care must be taken to use the appropriate method. The two questions to be
 answered are, 1. is this column part of the primary key or not, and 2. does the
@@ -263,7 +279,7 @@ Case 1: non primary key, RETURNING or equivalent is supported
 -------------------------------------------------------------
 
 In this case, columns should be marked as :class:`.FetchedValue` or with an
-explicit :paramref:`.Column.server_default`.   The
+explicit :paramref:`_schema.Column.server_default`.   The
 :paramref:`.orm.mapper.eager_defaults` flag may be used to indicate that these
 columns should be fetched immediately upon INSERT and sometimes UPDATE::
 
@@ -417,10 +433,10 @@ to the column.  The SQL generated by the above is:
 MySQL with TIMESTAMP primary key
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-When using the :class:`.TIMESTAMP` datatype with MySQL, MySQL ordinarily
+When using the :class:`_types.TIMESTAMP` datatype with MySQL, MySQL ordinarily
 associates a server-side default with this datatype automatically.  However
 when we use one as a primary key, the Core cannot retrieve the newly generated
-value unless we execute the function ourselves.  As :class:`.TIMESTAMP` on
+value unless we execute the function ourselves.  As :class:`_types.TIMESTAMP` on
 MySQL actually stores a binary value, we need to add an additional "CAST" to our
 usage of "NOW()" so that we retrieve a binary value that can be persisted
 into the column::
@@ -495,9 +511,9 @@ or mapped tables, across multiple databases, by configuring the
 :class:`.Session` with the :paramref:`.Session.binds` argument. This
 argument receives a dictionary that contains any combination of
 ORM-mapped classes, arbitrary classes within a mapped hierarchy (such
-as declarative base classes or mixins), :class:`.Table` objects,
-and :class:`.Mapper` objects as keys, which then refer typically to
-:class:`.Engine` or less typically :class:`.Connection` objects as targets.
+as declarative base classes or mixins), :class:`_schema.Table` objects,
+and :class:`_orm.Mapper` objects as keys, which then refer typically to
+:class:`_engine.Engine` or less typically :class:`_engine.Connection` objects as targets.
 The dictionary is consulted whenever the :class:`.Session` needs to
 emit SQL on behalf of a particular kind of mapped class in order to locate
 the appropriate source of database connectivity::
@@ -512,9 +528,9 @@ the appropriate source of database connectivity::
 
     session = Session()
 
-Above, SQL operations against either class will make usage of the :class:`.Engine`
+Above, SQL operations against either class will make usage of the :class:`_engine.Engine`
 linked to that class.     The functionality is comprehensive across both
-read and write operations; a :class:`.Query` that is against entities
+read and write operations; a :class:`_query.Query` that is against entities
 mapped to ``engine1`` (determined by looking at the first entity in the
 list of items requested) will make use of ``engine1`` to run the query.   A
 flush operation will make use of **both** engines on a per-class basis as it
@@ -591,23 +607,25 @@ More comprehensive rule-based class-level partitioning can be built by
 overriding the :meth:`.Session.get_bind` method.   Below we illustrate
 a custom :class:`.Session` which delivers the following rules:
 
-1. Flush operations are delivered to the engine named ``master``.
+1. Flush operations, as well as bulk "update" and "delete" operations,
+   are delivered to the engine named ``leader``.
 
 2. Operations on objects that subclass ``MyOtherClass`` all
    occur on the ``other`` engine.
 
 3. Read operations for all other classes occur on a random
-   choice of the ``slave1`` or ``slave2`` database.
+   choice of the ``follower1`` or ``follower2`` database.
 
 ::
 
     engines = {
-        'master':create_engine("sqlite:///master.db"),
+        'leader':create_engine("sqlite:///leader.db"),
         'other':create_engine("sqlite:///other.db"),
-        'slave1':create_engine("sqlite:///slave1.db"),
-        'slave2':create_engine("sqlite:///slave2.db"),
+        'follower1':create_engine("sqlite:///follower1.db"),
+        'follower2':create_engine("sqlite:///follower2.db"),
     }
 
+    from sqlalchemy.sql import Update, Delete
     from sqlalchemy.orm import Session, sessionmaker
     import random
 
@@ -615,11 +633,11 @@ a custom :class:`.Session` which delivers the following rules:
         def get_bind(self, mapper=None, clause=None):
             if mapper and issubclass(mapper.class_, MyOtherClass):
                 return engines['other']
-            elif self._flushing:
-                return engines['master']
+            elif self._flushing or isinstance(clause, (Update, Delete)):
+                return engines['leader']
             else:
                 return engines[
-                    random.choice(['slave1','slave2'])
+                    random.choice(['follower1','follower2'])
                 ]
 
 The above :class:`.Session` class is plugged in using the ``class_``
@@ -627,7 +645,7 @@ argument to :class:`.sessionmaker`::
 
     Session = sessionmaker(class_=RoutingSession)
 
-This approach can be combined with multiple :class:`.MetaData` objects,
+This approach can be combined with multiple :class:`_schema.MetaData` objects,
 using an approach such as that of using the declarative ``__abstract__``
 keyword, described at :ref:`declarative_abstract`.
 
@@ -641,7 +659,7 @@ Horizontal Partitioning
 Horizontal partitioning partitions the rows of a single table (or a set of
 tables) across multiple databases.    The SQLAlchemy :class:`.Session`
 contains support for this concept, however to use it fully requires that
-:class:`.Session` and :class:`.Query` subclasses are used.  A basic version
+:class:`.Session` and :class:`_query.Query` subclasses are used.  A basic version
 of these subclasses are available in the :ref:`horizontal_sharding_toplevel`
 ORM extension.   An example of use is at: :ref:`examples_sharding`.
 
@@ -650,26 +668,38 @@ ORM extension.   An example of use is at: :ref:`examples_sharding`.
 Bulk Operations
 ===============
 
-.. note::  Bulk Operations mode is a new series of operations made available
-   on the :class:`.Session` object for the purpose of invoking INSERT and
-   UPDATE statements with greatly reduced Python overhead, at the expense
-   of much less functionality, automation, and error checking.
-   As of SQLAlchemy 1.0, these features should be considered as "beta", and
-   additionally are intended for advanced users.
+.. deepalchemy:: Bulk operations are essentially lower-functionality versions
+   of the Unit of Work's facilities for emitting INSERT and UPDATE statements
+   on primary key targeted rows.   These routines were added to suit some
+   cases where many rows being inserted or updated could be run into the
+   database without as much of the usual unit of work overhead, in that
+   most unit of work features are **disabled**.
+
+   There is **usually no need to use these routines, and they are not easy
+   to use as there are many missing behaviors that are usually expected when
+   using ORM objects**; for efficient
+   bulk inserts, it's better to use the Core :class:`_sql.Insert` construct
+   directly.   Please read all caveats at :ref:`bulk_operations_caveats`.
+
+.. note:: Bulk INSERT and UPDATE should not be confused with the
+   more common feature known as :ref:`orm_expression_update_delete`.   This
+   feature allows a single UPDATE or DELETE statement with arbitrary WHERE
+   criteria to be emitted.
 
 .. versionadded:: 1.0.0
 
-Bulk operations on the :class:`.Session` include :meth:`.Session.bulk_save_objects`,
-:meth:`.Session.bulk_insert_mappings`, and :meth:`.Session.bulk_update_mappings`.
-The purpose of these methods is to directly expose internal elements of the unit of work system,
-such that facilities for emitting INSERT and UPDATE statements given dictionaries
-or object states can be utilized alone, bypassing the normal unit of work
-mechanics of state, relationship and attribute management.   The advantages
-to this approach is strictly one of reduced Python overhead:
+Bulk INSERT/per-row UPDATE operations on the :class:`.Session` include
+:meth:`.Session.bulk_save_objects`, :meth:`.Session.bulk_insert_mappings`, and
+:meth:`.Session.bulk_update_mappings`. The purpose of these methods is to
+directly expose internal elements of the unit of work system, such that
+facilities for emitting INSERT and UPDATE statements given dictionaries or
+object states can be utilized alone, bypassing the normal unit of work
+mechanics of state, relationship and attribute management.   The advantages to
+this approach is strictly one of reduced Python overhead:
 
 * The flush() process, including the survey of all objects, their state,
   their cascade status, the status of all objects associated with them
-  via :func:`.relationship`, and the topological sort of all operations to
+  via :func:`_orm.relationship`, and the topological sort of all operations to
   be performed is completely bypassed.  This reduces a great amount of
   Python overhead.
 
@@ -746,8 +776,8 @@ Comparison to Core Insert / Update Constructs
 ---------------------------------------------
 
 The bulk methods offer performance that under particular circumstances
-can be close to that of using the core :class:`.Insert` and
-:class:`.Update` constructs in an "executemany" context (for a description
+can be close to that of using the core :class:`_expression.Insert` and
+:class:`_expression.Update` constructs in an "executemany" context (for a description
 of "executemany", see :ref:`execute_multiple` in the Core tutorial).
 In order to achieve this, the
 :paramref:`.Session.bulk_insert_mappings.return_defaults`
@@ -755,14 +785,19 @@ flag should be disabled so that rows can be batched together.   The example
 suite in :ref:`examples_performance` should be carefully studied in order
 to gain familiarity with how fast bulk performance can be achieved.
 
-ORM Compatibility
------------------
+.. _bulk_operations_caveats:
+
+ORM Compatibility / Caveats
+----------------------------
+
+.. warning::  Be sure to familiarize with these limitations before using the
+   bulk routines.
 
 The bulk insert / update methods lose a significant amount of functionality
 versus traditional ORM use.   The following is a listing of features that
 are **not available** when using these methods:
 
-* persistence along :func:`.relationship` linkages
+* persistence along :func:`_orm.relationship` linkages
 
 * sorting of rows within order of dependency; rows are inserted or updated
   directly in the order in which they are passed to the methods
@@ -770,9 +805,15 @@ are **not available** when using these methods:
 * Session-management on the given objects, including attachment to the
   session, identity map management.
 
-* Functionality related to primary key mutation, ON UPDATE cascade
+* Functionality related to primary key mutation, ON UPDATE cascade -
+  **mutation of primary key columns will not work** - as the original PK
+  value of each row is not available, so the WHERE criteria cannot be
+  generated.
 
-* SQL expression inserts / updates (e.g. :ref:`flush_embedded_sql_expressions`)
+* SQL expression inserts / updates (e.g. :ref:`flush_embedded_sql_expressions`) -
+  having to evaluate these would prevent INSERT and UPDATE statements from
+  being batched together in a straightforward way for a single executemany()
+  call as they alter the SQL compilation of the statement itself.
 
 * ORM events such as :meth:`.MapperEvents.before_insert`, etc.  The bulk
   session methods have no event support.

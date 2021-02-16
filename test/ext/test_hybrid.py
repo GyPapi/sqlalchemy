@@ -9,14 +9,15 @@ from sqlalchemy import String
 from sqlalchemy.ext import hybrid
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import aliased
-from sqlalchemy.orm import persistence
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import update
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 
 
@@ -70,14 +71,14 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A.value), "SELECT a.value AS a_value FROM a"
         )
 
     def test_aliased_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A).value),
             "SELECT a_1.value AS a_1_value FROM a AS a_1",
@@ -85,7 +86,7 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_filter(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A)).filter_by(value="foo"),
             "SELECT a_1.value AS a_1_value, a_1.id AS a_1_id "
@@ -183,7 +184,7 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_any(self):
         A, B = self._relationship_fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(B).filter(B.as_.any(value=5)),
             "SELECT b.id AS b_id FROM b WHERE EXISTS "
@@ -200,7 +201,7 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A).filter_by(value="foo"),
             "SELECT a.value AS a_value, a.id AS a_id "
@@ -209,7 +210,7 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A)).filter_by(value="foo"),
             "SELECT a_1.value AS a_1_value, a_1.id AS a_1_id "
@@ -489,7 +490,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A).filter(A.value(5) == "foo"),
             "SELECT a.value AS a_value, a.id AS a_id "
@@ -498,7 +499,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         a1 = aliased(A)
         self.assert_compile(
             sess.query(a1).filter(a1.value(5) == "foo"),
@@ -508,7 +509,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_col(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A.value(5)),
             "SELECT foo(a.value, :foo_1) + :foo_2 AS anon_1 FROM a",
@@ -516,7 +517,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_query_col(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A).value(5)),
             "SELECT foo(a_1.value, :foo_1) + :foo_2 AS anon_1 FROM a AS a_1",
@@ -579,8 +580,8 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
                 return self.fname
 
     @classmethod
-    def insert_data(cls):
-        s = Session()
+    def insert_data(cls, connection):
+        s = Session(connection)
         jill = cls.classes.Person(id=3, first_name="jill")
         s.add(jill)
         s.commit()
@@ -588,15 +589,10 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_update_plain(self):
         Person = self.classes.Person
 
-        s = Session()
-        q = s.query(Person)
-
-        bulk_ud = persistence.BulkUpdate.factory(
-            q, False, {Person.fname: "Dr."}, {}
-        )
+        statement = update(Person).values({Person.fname: "Dr."})
 
         self.assert_compile(
-            bulk_ud,
+            statement,
             "UPDATE person SET first_name=:first_name",
             params={"first_name": "Dr."},
         )
@@ -604,15 +600,10 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
-        q = s.query(Person)
-
-        bulk_ud = persistence.BulkUpdate.factory(
-            q, False, {Person.name: "Dr. No"}, {}
-        )
+        statement = update(Person).values({Person.name: "Dr. No"})
 
         self.assert_compile(
-            bulk_ud,
+            statement,
             "UPDATE person SET first_name=:first_name, last_name=:last_name",
             params={"first_name": "Dr.", "last_name": "No"},
         )
@@ -620,7 +611,7 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_evaluate_hybrid_attr_indirect(self):
         Person = self.classes.Person
 
-        s = Session()
+        s = fixture_session()
         jill = s.query(Person).get(3)
 
         s.query(Person).update(
@@ -631,7 +622,7 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_evaluate_hybrid_attr_plain(self):
         Person = self.classes.Person
 
-        s = Session()
+        s = fixture_session()
         jill = s.query(Person).get(3)
 
         s.query(Person).update(
@@ -642,7 +633,7 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_fetch_hybrid_attr_indirect(self):
         Person = self.classes.Person
 
-        s = Session()
+        s = fixture_session()
         jill = s.query(Person).get(3)
 
         s.query(Person).update(
@@ -653,7 +644,7 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_fetch_hybrid_attr_plain(self):
         Person = self.classes.Person
 
-        s = Session()
+        s = fixture_session()
         jill = s.query(Person).get(3)
 
         s.query(Person).update(
@@ -664,7 +655,7 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_evaluate_hybrid_attr_w_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
+        s = fixture_session()
         jill = s.query(Person).get(3)
 
         s.query(Person).update(
@@ -675,7 +666,7 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_fetch_hybrid_attr_w_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
+        s = fixture_session()
         jill = s.query(Person).get(3)
 
         s.query(Person).update(
@@ -686,7 +677,7 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_evaluate_hybrid_attr_indirect_w_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
+        s = fixture_session()
         jill = s.query(Person).get(3)
 
         s.query(Person).update(
@@ -706,7 +697,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         from sqlalchemy import literal
 
         symbols = ("usd", "gbp", "cad", "eur", "aud")
@@ -823,7 +814,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_one(self):
         BankAccount, Amount = self.BankAccount, self.Amount
-        session = Session()
+        session = fixture_session()
 
         query = session.query(BankAccount).filter(
             BankAccount.balance == Amount(10000, "cad")
@@ -839,7 +830,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_two(self):
         BankAccount, Amount = self.BankAccount, self.Amount
-        session = Session()
+        session = fixture_session()
 
         # alternatively we can do the calc on the DB side.
         query = (
@@ -868,7 +859,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_three(self):
         BankAccount = self.BankAccount
-        session = Session()
+        session = fixture_session()
 
         query = session.query(BankAccount).filter(
             BankAccount.balance.as_currency("cad")
@@ -889,7 +880,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_four(self):
         BankAccount = self.BankAccount
-        session = Session()
+        session = fixture_session()
 
         # 4c. query all amounts, converting to "CAD" on the DB side
         query = session.query(BankAccount.balance.as_currency("cad").amount)
@@ -902,7 +893,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_five(self):
         BankAccount = self.BankAccount
-        session = Session()
+        session = fixture_session()
 
         # 4d. average balance in EUR
         query = session.query(func.avg(BankAccount.balance.as_currency("eur")))

@@ -12,8 +12,10 @@ from sqlalchemy.testing import fixtures
 
 
 class DocTest(fixtures.TestBase):
+    __requires__ = ("python3",)
+
     def _setup_logger(self):
-        rootlogger = logging.getLogger("sqlalchemy.engine.base.Engine")
+        rootlogger = logging.getLogger("sqlalchemy.engine.Engine")
 
         class MyStream(object):
             def write(self, string):
@@ -28,7 +30,7 @@ class DocTest(fixtures.TestBase):
         rootlogger.addHandler(handler)
 
     def _teardown_logger(self):
-        rootlogger = logging.getLogger("sqlalchemy.engine.base.Engine")
+        rootlogger = logging.getLogger("sqlalchemy.engine.Engine")
         rootlogger.removeHandler(self._handler)
 
     def _setup_create_table_patcher(self):
@@ -46,15 +48,18 @@ class DocTest(fixtures.TestBase):
 
         ddl.sort_tables_and_constraints = self.orig_sort
 
-    def setup(self):
+    def setup_test(self):
         self._setup_logger()
         self._setup_create_table_patcher()
 
-    def teardown(self):
+    def teardown_test(self):
         self._teardown_create_table_patcher()
         self._teardown_logger()
 
-    def _run_doctest_for_content(self, name, content):
+    def _run_doctest(self, *fnames):
+        here = os.path.dirname(__file__)
+        sqla_base = os.path.normpath(os.path.join(here, "..", ".."))
+
         optionflags = (
             doctest.ELLIPSIS
             | doctest.NORMALIZE_WHITESPACE
@@ -66,33 +71,49 @@ class DocTest(fixtures.TestBase):
             optionflags=optionflags,
             checker=_get_unicode_checker(),
         )
-        globs = {"print_function": print_function}
         parser = doctest.DocTestParser()
-        test = parser.get_doctest(content, globs, name, name, 0)
-        runner.run(test)
-        runner.summarize()
-        assert not runner.failures
+        globs = {"print_function": print_function}
 
-    def _run_doctest(self, fname):
-        here = os.path.dirname(__file__)
-        sqla_base = os.path.normpath(os.path.join(here, "..", ".."))
-        path = os.path.join(sqla_base, "doc/build", fname)
-        if not os.path.exists(path):
-            config.skip_test("Can't find documentation file %r" % path)
-        with open(path) as file_:
-            content = file_.read()
-            content = re.sub(r"{(?:stop|sql|opensql)}", "", content)
-            self._run_doctest_for_content(fname, content)
+        for fname in fnames:
+            path = os.path.join(sqla_base, "doc/build", fname)
+            if not os.path.exists(path):
+                config.skip_test("Can't find documentation file %r" % path)
+            with open(path, encoding="utf-8") as file_:
+                content = file_.read()
+                content = re.sub(r"{(?:stop|sql|opensql)}", "", content)
+
+                test = parser.get_doctest(content, globs, fname, fname, 0)
+                runner.run(test, clear_globs=False)
+                runner.summarize()
+                globs.update(test.globs)
+                assert not runner.failures
+
+    def test_20_style(self):
+        self._run_doctest(
+            "tutorial/index.rst",
+            "tutorial/engine.rst",
+            "tutorial/dbapi_transactions.rst",
+            "tutorial/metadata.rst",
+            "tutorial/data.rst",
+            "tutorial/orm_data_manipulation.rst",
+            "tutorial/orm_related_objects.rst",
+        )
 
     def test_orm(self):
         self._run_doctest("orm/tutorial.rst")
 
-    @testing.emits_warning("SELECT statement has a cartesian")
+    @testing.emits_warning()
     def test_core(self):
         self._run_doctest("core/tutorial.rst")
 
+    def test_core_operators(self):
+        self._run_doctest("core/operators.rst")
 
-# unicode checker courtesy py.test
+    def test_orm_queryguide(self):
+        self._run_doctest("orm/queryguide.rst")
+
+
+# unicode checker courtesy pytest
 
 
 def _get_unicode_checker():
@@ -152,3 +173,6 @@ def _get_allow_unicode_flag():
     import doctest
 
     return doctest.register_optionflag("ALLOW_UNICODE")
+
+
+# increase number to force pipeline run. 1

@@ -10,6 +10,7 @@ from sqlalchemy.orm import scoped_session
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import mock
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -38,7 +39,7 @@ class ScopedSessionTest(fixtures.MappedTest):
     def test_basic(self):
         table2, table1 = self.tables.table2, self.tables.table1
 
-        Session = scoped_session(sa.orm.sessionmaker())
+        Session = scoped_session(sa.orm.sessionmaker(testing.db))
 
         class CustomQuery(query.Query):
             pass
@@ -127,3 +128,26 @@ class ScopedSessionTest(fixtures.MappedTest):
         mock_scope_func.return_value = 1
         s2 = Session(autocommit=True)
         assert s2.autocommit == True
+
+    def test_methods_etc(self):
+        mock_session = Mock()
+        mock_session.bind = "the bind"
+
+        sess = scoped_session(lambda: mock_session)
+
+        sess.add("add")
+        sess.delete("delete")
+
+        eq_(sess.bind, "the bind")
+
+        eq_(
+            mock_session.mock_calls,
+            [mock.call.add("add", True), mock.call.delete("delete")],
+        )
+
+        with mock.patch(
+            "sqlalchemy.orm.session.object_session"
+        ) as mock_object_session:
+            sess.object_session("foo")
+
+        eq_(mock_object_session.mock_calls, [mock.call("foo")])

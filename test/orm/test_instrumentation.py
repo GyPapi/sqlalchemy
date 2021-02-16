@@ -6,7 +6,7 @@ from sqlalchemy import MetaData
 from sqlalchemy import util
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import class_mapper
-from sqlalchemy.orm import create_session
+from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import instrumentation
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
@@ -15,6 +15,7 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import ne_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -787,9 +788,11 @@ class MiscTest(fixtures.ORMTest):
             a = A()
             b.a = a
 
-            session = create_session()
+            session = fixture_session()
             session.add(b)
             assert a in session, "base is %s" % base
+
+            clear_mappers()
 
     def test_compileonattr_rel_backref_b(self):
         m = MetaData()
@@ -829,6 +832,7 @@ class MiscTest(fixtures.ORMTest):
             b = B()
             b.a = a
 
-            session = create_session()
+            session = fixture_session()
             session.add(a)
             assert b in session, "base: %s" % base
+            clear_mappers()

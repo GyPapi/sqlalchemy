@@ -8,17 +8,19 @@ from sqlalchemy import Integer
 from sqlalchemy import not_
 from sqlalchemy import or_
 from sqlalchemy import String
+from sqlalchemy import tuple_
 from sqlalchemy.orm import evaluator
+from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
+from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
-
 
 compiler = evaluator.EvaluatorCompiler()
 
@@ -100,7 +102,11 @@ class EvaluateTest(fixtures.MappedTest):
 
         eval_eq(
             User.name == None,  # noqa
-            testcases=[(User(name="foo"), False), (User(name=None), True)],
+            testcases=[
+                (User(name="foo"), False),
+                (User(name=None), True),
+                (None, None),
+            ],
         )
 
     def test_warn_on_unannotated_matched_column(self):
@@ -144,6 +150,7 @@ class EvaluateTest(fixtures.MappedTest):
                 (User(name="foo"), False),
                 (User(name=True), False),
                 (User(name=False), True),
+                (None, None),
             ],
         )
 
@@ -153,6 +160,7 @@ class EvaluateTest(fixtures.MappedTest):
                 (User(name="foo"), False),
                 (User(name=True), True),
                 (User(name=False), False),
+                (None, None),
             ],
         )
 
@@ -167,6 +175,7 @@ class EvaluateTest(fixtures.MappedTest):
                 (User(id=1, name="bar"), False),
                 (User(id=2, name="bar"), False),
                 (User(id=1, name=None), None),
+                (None, None),
             ],
         )
 
@@ -179,6 +188,7 @@ class EvaluateTest(fixtures.MappedTest):
                 (User(id=2, name="bar"), False),
                 (User(id=1, name=None), True),
                 (User(id=2, name=None), None),
+                (None, None),
             ],
         )
 
@@ -188,6 +198,58 @@ class EvaluateTest(fixtures.MappedTest):
                 (User(id=1), False),
                 (User(id=2), True),
                 (User(id=None), None),
+            ],
+        )
+
+    def test_in(self):
+        User = self.classes.User
+
+        eval_eq(
+            User.name.in_(["foo", "bar"]),
+            testcases=[
+                (User(id=1, name="foo"), True),
+                (User(id=2, name="bat"), False),
+                (User(id=1, name="bar"), True),
+                (User(id=1, name=None), None),
+                (None, None),
+            ],
+        )
+
+        eval_eq(
+            User.name.not_in(["foo", "bar"]),
+            testcases=[
+                (User(id=1, name="foo"), False),
+                (User(id=2, name="bat"), True),
+                (User(id=1, name="bar"), False),
+                (User(id=1, name=None), None),
+                (None, None),
+            ],
+        )
+
+    def test_in_tuples(self):
+        User = self.classes.User
+
+        eval_eq(
+            tuple_(User.id, User.name).in_([(1, "foo"), (2, "bar")]),
+            testcases=[
+                (User(id=1, name="foo"), True),
+                (User(id=2, name="bat"), False),
+                (User(id=1, name="bar"), False),
+                (User(id=2, name="bar"), True),
+                (User(id=1, name=None), None),
+                (None, None),
+            ],
+        )
+
+        eval_eq(
+            tuple_(User.id, User.name).not_in([(1, "foo"), (2, "bar")]),
+            testcases=[
+                (User(id=1, name="foo"), False),
+                (User(id=2, name="bat"), True),
+                (User(id=1, name="bar"), True),
+                (User(id=2, name="bar"), False),
+                (User(id=1, name=None), None),
+                (None, None),
             ],
         )
 
@@ -203,6 +265,7 @@ class EvaluateTest(fixtures.MappedTest):
                 (User(id=2, name="bar"), True),
                 (User(id=None, name="foo"), None),
                 (User(id=None, name=None), None),
+                (None, None),
             ],
         )
 
@@ -224,10 +287,10 @@ class M2OEvaluateTest(fixtures.DeclarativeMappedTest):
             name = Column(String(50), primary_key=True)
             parent = relationship(Parent)
 
-    def test_delete(self):
+    def test_delete_not_expired(self):
         Parent, Child = self.classes("Parent", "Child")
 
-        session = Session()
+        session = fixture_session(expire_on_commit=False)
 
         p = Parent(id=1)
         session.add(p)
@@ -240,3 +303,24 @@ class M2OEvaluateTest(fixtures.DeclarativeMappedTest):
         session.query(Child).filter(Child.parent == p).delete("evaluate")
 
         is_(inspect(c).deleted, True)
+
+    def test_delete_expired(self):
+        Parent, Child = self.classes("Parent", "Child")
+
+        session = fixture_session()
+
+        p = Parent(id=1)
+        session.add(p)
+        session.commit()
+
+        c = Child(name="foo", parent=p)
+        session.add(c)
+        session.commit()
+
+        session.query(Child).filter(Child.parent == p).delete("evaluate")
+
+        # because it's expired
+        is_(inspect(c).deleted, False)
+
+        # but it's gone
+        assert_raises(orm_exc.ObjectDeletedError, lambda: c.name)

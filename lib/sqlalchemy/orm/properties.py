@@ -1,5 +1,5 @@
 # orm/properties.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2021 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -14,8 +14,12 @@ mapped attributes.
 from __future__ import absolute_import
 
 from . import attributes
+from .descriptor_props import CompositeProperty
+from .descriptor_props import ConcreteInheritedProperty
+from .descriptor_props import SynonymProperty
 from .interfaces import PropComparator
 from .interfaces import StrategizedProperty
+from .relationships import RelationshipProperty
 from .util import _orm_full_deannotate
 from .. import log
 from .. import util
@@ -23,18 +27,25 @@ from ..sql import coercions
 from ..sql import roles
 
 
-__all__ = ["ColumnProperty"]
+__all__ = [
+    "ColumnProperty",
+    "CompositeProperty",
+    "ConcreteInheritedProperty",
+    "RelationshipProperty",
+    "SynonymProperty",
+]
 
 
 @log.class_logger
 class ColumnProperty(StrategizedProperty):
     """Describes an object attribute that corresponds to a table column.
 
-    Public constructor is the :func:`.orm.column_property` function.
+    Public constructor is the :func:`_orm.column_property` function.
 
     """
 
     strategy_wildcard_key = "column"
+    inherit_cache = True
 
     __slots__ = (
         "_orig_columns",
@@ -58,13 +69,17 @@ class ColumnProperty(StrategizedProperty):
     )
 
     def __init__(self, *columns, **kwargs):
-        r"""Provide a column-level property for use with a Mapper.
+        r"""Provide a column-level property for use with a mapping.
 
         Column-based properties can normally be applied to the mapper's
-        ``properties`` dictionary using the :class:`.Column` element directly.
+        ``properties`` dictionary using the :class:`_schema.Column`
+        element directly.
         Use this function when the given column is not directly present within
         the mapper's selectable; examples include SQL expressions, functions,
         and scalar SELECT queries.
+
+        The :func:`_orm.column_property` function returns an instance of
+        :class:`.ColumnProperty`.
 
         Columns that aren't present in the mapper's selectable won't be
         persisted by the mapper and are effectively "read-only" attributes.
@@ -128,6 +143,14 @@ class ColumnProperty(StrategizedProperty):
 
                 :ref:`deferred_raiseload`
 
+        .. seealso::
+
+            :ref:`column_property_options` - to map columns while including
+            mapping options
+
+            :ref:`mapper_column_property_sql_expressions` - to map SQL
+            expressions
+
         """
         super(ColumnProperty, self).__init__()
         self._orig_columns = [
@@ -179,16 +202,20 @@ class ColumnProperty(StrategizedProperty):
         if self.raiseload:
             self.strategy_key += (("raiseload", True),)
 
-    @util.dependencies("sqlalchemy.orm.state", "sqlalchemy.orm.strategies")
-    def _memoized_attr__deferred_column_loader(self, state, strategies):
+    @util.preload_module("sqlalchemy.orm.state", "sqlalchemy.orm.strategies")
+    def _memoized_attr__deferred_column_loader(self):
+        state = util.preloaded.orm_state
+        strategies = util.preloaded.orm_strategies
         return state.InstanceState._instance_level_callable_processor(
             self.parent.class_manager,
             strategies.LoadDeferredColumns(self.key),
             self.key,
         )
 
-    @util.dependencies("sqlalchemy.orm.state", "sqlalchemy.orm.strategies")
-    def _memoized_attr__raise_column_loader(self, state, strategies):
+    @util.preload_module("sqlalchemy.orm.state", "sqlalchemy.orm.strategies")
+    def _memoized_attr__raise_column_loader(self):
+        state = util.preloaded.orm_state
+        strategies = util.preloaded.orm_strategies
         return state.InstanceState._instance_level_callable_processor(
             self.parent.class_manager,
             strategies.LoadDeferredColumns(self.key, True),
@@ -205,6 +232,21 @@ class ColumnProperty(StrategizedProperty):
     @property
     def expression(self):
         """Return the primary column or expression for this ColumnProperty.
+
+        E.g.::
+
+
+            class File(Base):
+                # ...
+
+                name = Column(String(64))
+                extension = Column(String(8))
+                filename = column_property(name + '.' + extension)
+                path = column_property('C:/' + filename.expression)
+
+        .. seealso::
+
+            :ref:`mapper_column_property_sql_expressions_composed`
 
         """
         return self.columns[0]
@@ -223,6 +265,7 @@ class ColumnProperty(StrategizedProperty):
 
     def do_init(self):
         super(ColumnProperty, self).do_init()
+
         if len(self.columns) > 1 and set(self.parent.primary_key).issuperset(
             self.columns
         ):
@@ -296,28 +339,79 @@ class ColumnProperty(StrategizedProperty):
 
         """
 
-        __slots__ = "__clause_element__", "info"
+        __slots__ = "__clause_element__", "info", "expressions"
+
+        def _orm_annotate_column(self, column):
+            """annotate and possibly adapt a column to be returned
+            as the mapped-attribute exposed version of the column.
+
+            The column in this context needs to act as much like the
+            column in an ORM mapped context as possible, so includes
+            annotations to give hints to various ORM functions as to
+            the source entity of this column.   It also adapts it
+            to the mapper's with_polymorphic selectable if one is
+            present.
+
+            """
+
+            pe = self._parententity
+            annotations = {
+                "entity_namespace": pe,
+                "parententity": pe,
+                "parentmapper": pe,
+                "proxy_key": self.prop.key,
+            }
+
+            col = column
+
+            # for a mapper with polymorphic_on and an adapter, return
+            # the column against the polymorphic selectable.
+            # see also orm.util._orm_downgrade_polymorphic_columns
+            # for the reverse operation.
+            if self._parentmapper._polymorphic_adapter:
+                mapper_local_col = col
+                col = self._parentmapper._polymorphic_adapter.traverse(col)
+
+                # this is a clue to the ORM Query etc. that this column
+                # was adapted to the mapper's polymorphic_adapter.  the
+                # ORM uses this hint to know which column its adapting.
+                annotations["adapt_column"] = mapper_local_col
+
+            return col._annotate(annotations)._set_propagate_attrs(
+                {"compile_state_plugin": "orm", "plugin_subject": pe}
+            )
 
         def _memoized_method___clause_element__(self):
             if self.adapter:
                 return self.adapter(self.prop.columns[0], self.prop.key)
             else:
-                # no adapter, so we aren't aliased
-                # assert self._parententity is self._parentmapper
-                return self.prop.columns[0]._annotate(
-                    {
-                        "parententity": self._parententity,
-                        "parentmapper": self._parententity,
-                        "orm_key": self.prop.key,
-                    }
-                )
+                return self._orm_annotate_column(self.prop.columns[0])
 
         def _memoized_attr_info(self):
+            """The .info dictionary for this attribute."""
+
             ce = self.__clause_element__()
             try:
                 return ce.info
             except AttributeError:
                 return self.prop.info
+
+        def _memoized_attr_expressions(self):
+            """The full sequence of columns referenced by this
+            attribute, adjusted for any aliasing in progress.
+
+            .. versionadded:: 1.3.17
+
+            """
+            if self.adapter:
+                return [
+                    self.adapter(col, self.prop.key)
+                    for col in self.prop.columns
+                ]
+            else:
+                return [
+                    self._orm_annotate_column(col) for col in self.prop.columns
+                ]
 
         def _fallback_getattr(self, key):
             """proxy attribute access down to the mapped column.

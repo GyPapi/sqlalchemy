@@ -2,11 +2,11 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import select
 from sqlalchemy import String
-from sqlalchemy import testing
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import Session
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -24,13 +24,13 @@ class InheritingSelectablesTest(fixtures.MappedTest):
         cls.tables.bar = foo.select(foo.c.b == "bar").alias("bar")
         cls.tables.baz = foo.select(foo.c.b == "baz").alias("baz")
 
-    def test_load(self):
+    def test_load(self, connection):
         foo, bar, baz = self.tables.foo, self.tables.bar, self.tables.baz
         # TODO: add persistence test also
-        testing.db.execute(foo.insert(), a="not bar", b="baz")
-        testing.db.execute(foo.insert(), a="also not bar", b="baz")
-        testing.db.execute(foo.insert(), a="i am bar", b="bar")
-        testing.db.execute(foo.insert(), a="also bar", b="bar")
+        connection.execute(foo.insert(), dict(a="not bar", b="baz"))
+        connection.execute(foo.insert(), dict(a="also not bar", b="baz"))
+        connection.execute(foo.insert(), dict(a="i am bar", b="bar"))
+        connection.execute(foo.insert(), dict(a="also bar", b="bar"))
 
         class Foo(fixtures.ComparableEntity):
             pass
@@ -48,7 +48,7 @@ class InheritingSelectablesTest(fixtures.MappedTest):
             baz,
             with_polymorphic=(
                 "*",
-                foo.join(baz, foo.c.b == "baz").alias("baz"),
+                foo.join(baz, foo.c.b == "baz").select().subquery("baz"),
             ),
             inherits=Foo,
             inherit_condition=(foo.c.a == baz.c.a),
@@ -61,7 +61,7 @@ class InheritingSelectablesTest(fixtures.MappedTest):
             bar,
             with_polymorphic=(
                 "*",
-                foo.join(bar, foo.c.b == "bar").alias("bar"),
+                foo.join(bar, foo.c.b == "bar").select().subquery("bar"),
             ),
             inherits=Foo,
             inherit_condition=(foo.c.a == bar.c.a),
@@ -69,12 +69,8 @@ class InheritingSelectablesTest(fixtures.MappedTest):
             polymorphic_identity="bar",
         )
 
-        s = Session()
-
-        assert [Baz(), Baz(), Bar(), Bar()] == s.query(Foo).order_by(
-            Foo.b.desc()
-        ).all()
-        assert [Bar(), Bar()] == s.query(Bar).all()
+        s = Session(connection)
+        eq_(s.query(Bar).all(), [Bar(), Bar()])
 
 
 class JoinFromSelectPersistenceTest(fixtures.MappedTest):
@@ -113,7 +109,7 @@ class JoinFromSelectPersistenceTest(fixtures.MappedTest):
         Base, Child = self.classes.Base, self.classes.Child
         base, child = self.tables.base, self.tables.child
 
-        base_select = select([base]).alias()
+        base_select = select(base).alias()
         mapper(
             Base,
             base_select,
@@ -122,7 +118,7 @@ class JoinFromSelectPersistenceTest(fixtures.MappedTest):
         )
         mapper(Child, child, inherits=Base, polymorphic_identity="child")
 
-        sess = Session()
+        sess = fixture_session()
 
         # 2. use an id other than "1" here so can't rely on
         # the two inserts having the same id

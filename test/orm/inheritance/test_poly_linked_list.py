@@ -1,13 +1,14 @@
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
+from sqlalchemy import testing
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -60,8 +61,11 @@ class PolymorphicCircularTest(fixtures.MappedTest):
         #   'table1' : table1.select(table1.c.type.in_(['table1', 'table1b'])),
         #   }, None, 'pjoin')
 
-        join = table1.outerjoin(table2).outerjoin(table3).alias("pjoin")
-        # join = None
+        with testing.expect_deprecated_20(
+            r"The Join.alias\(\) method is considered legacy"
+        ):
+            join = table1.outerjoin(table2).outerjoin(table3).alias("pjoin")
+            # join = None
 
         class Table1(object):
             def __init__(self, name, data=None):
@@ -207,7 +211,7 @@ class PolymorphicCircularTest(fixtures.MappedTest):
         )
 
     def _testlist(self, classes):
-        sess = create_session()
+        sess = fixture_session()
 
         # create objects in a linked list
         count = 1

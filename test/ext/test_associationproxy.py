@@ -4,6 +4,7 @@ import pickle
 from sqlalchemy import cast
 from sqlalchemy import exc
 from sqlalchemy import ForeignKey
+from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
@@ -20,11 +21,9 @@ from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import collections
 from sqlalchemy.orm import composite
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.collections import attribute_mapped_collection
 from sqlalchemy.orm.collections import collection
 from sqlalchemy.testing import assert_raises
@@ -34,6 +33,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing.assertions import expect_warnings
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.mock import call
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.schema import Column
@@ -100,6 +100,9 @@ class AutoFlushTest(fixtures.TablesTest):
             ),
             Column("name", String(50)),
         )
+
+    def teardown_test(self):
+        clear_mappers()
 
     def _fixture(self, collection_class, is_dict=False):
         class Parent(object):
@@ -195,10 +198,10 @@ class AutoFlushTest(fixtures.TablesTest):
 
 
 class _CollectionOperations(fixtures.TestBase):
-    def setup(self):
+    def setup_test(self):
         collection_class = self.collection_class
 
-        metadata = MetaData(testing.db)
+        metadata = MetaData()
 
         parents_table = Table(
             "Parent",
@@ -251,14 +254,14 @@ class _CollectionOperations(fixtures.TestBase):
         )
         mapper(Child, children_table)
 
-        metadata.create_all()
+        metadata.create_all(testing.db)
 
         self.metadata = metadata
-        self.session = create_session()
+        self.session = fixture_session()
         self.Parent, self.Child = Parent, Child
 
-    def teardown(self):
-        self.metadata.drop_all()
+    def teardown_test(self):
+        self.metadata.drop_all(testing.db)
 
     def roundtrip(self, obj):
         if obj not in self.session:
@@ -882,8 +885,8 @@ class CustomObjectTest(_CollectionOperations):
 
 
 class ProxyFactoryTest(ListTest):
-    def setup(self):
-        metadata = MetaData(testing.db)
+    def setup_test(self):
+        metadata = MetaData()
 
         parents_table = Table(
             "Parent",
@@ -937,10 +940,10 @@ class ProxyFactoryTest(ListTest):
         )
         mapper(Child, children_table)
 
-        metadata.create_all()
+        metadata.create_all(testing.db)
 
         self.metadata = metadata
-        self.session = create_session()
+        self.session = fixture_session()
         self.Parent, self.Child = Parent, Child
 
     def test_sequence_ops(self):
@@ -1000,8 +1003,8 @@ class ScalarTest(fixtures.TestBase):
         )
         mapper(Child, children_table)
 
-        metadata.create_all()
-        session = create_session()
+        metadata.create_all(testing.db)
+        session = fixture_session()
 
         def roundtrip(obj):
             if obj not in session:
@@ -1154,8 +1157,8 @@ class ScalarTest(fixtures.TestBase):
 
 
 class LazyLoadTest(fixtures.TestBase):
-    def setup(self):
-        metadata = MetaData(testing.db)
+    def setup_test(self):
+        metadata = MetaData()
 
         parents_table = Table(
             "Parent",
@@ -1187,15 +1190,15 @@ class LazyLoadTest(fixtures.TestBase):
                 self.name = name
 
         mapper(Child, children_table)
-        metadata.create_all()
+        metadata.create_all(testing.db)
 
         self.metadata = metadata
-        self.session = create_session()
+        self.session = fixture_session()
         self.Parent, self.Child = Parent, Child
         self.table = parents_table
 
-    def teardown(self):
-        self.metadata.drop_all()
+    def teardown_test(self):
+        self.metadata.drop_all(testing.db)
 
     def roundtrip(self, obj):
         self.session.add(obj)
@@ -1326,10 +1329,13 @@ class KVChild(object):
         self.value = value
 
 
-class ReconstitutionTest(fixtures.TestBase):
-    def setup(self):
-        metadata = MetaData(testing.db)
-        parents = Table(
+class ReconstitutionTest(fixtures.MappedTest):
+    run_setup_mappers = "each"
+    run_setup_classes = "each"
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
             "parents",
             metadata,
             Column(
@@ -1337,7 +1343,7 @@ class ReconstitutionTest(fixtures.TestBase):
             ),
             Column("name", String(30)),
         )
-        children = Table(
+        Table(
             "children",
             metadata,
             Column(
@@ -1346,23 +1352,24 @@ class ReconstitutionTest(fixtures.TestBase):
             Column("parent_id", Integer, ForeignKey("parents.id")),
             Column("name", String(30)),
         )
-        metadata.create_all()
-        parents.insert().execute(name="p1")
-        self.metadata = metadata
-        self.parents = parents
-        self.children = children
-        Parent.kids = association_proxy("children", "name")
 
-    def teardown(self):
-        self.metadata.drop_all()
-        clear_mappers()
+    @classmethod
+    def insert_data(cls, connection):
+        parents = cls.tables.parents
+        connection.execute(parents.insert(), dict(name="p1"))
+
+    @classmethod
+    def setup_classes(cls):
+        Parent.kids = association_proxy("children", "name")
 
     def test_weak_identity_map(self):
         mapper(
-            Parent, self.parents, properties=dict(children=relationship(Child))
+            Parent,
+            self.tables.parents,
+            properties=dict(children=relationship(Child)),
         )
-        mapper(Child, self.children)
-        session = create_session()
+        mapper(Child, self.tables.children)
+        session = fixture_session()
 
         def add_child(parent_name, child_name):
             parent = session.query(Parent).filter_by(name=parent_name).one()
@@ -1377,9 +1384,11 @@ class ReconstitutionTest(fixtures.TestBase):
 
     def test_copy(self):
         mapper(
-            Parent, self.parents, properties=dict(children=relationship(Child))
+            Parent,
+            self.tables.parents,
+            properties=dict(children=relationship(Child)),
         )
-        mapper(Child, self.children)
+        mapper(Child, self.tables.children)
         p = Parent("p1")
         p.kids.extend(["c1", "c2"])
         p_copy = copy.copy(p)
@@ -1389,9 +1398,11 @@ class ReconstitutionTest(fixtures.TestBase):
 
     def test_pickle_list(self):
         mapper(
-            Parent, self.parents, properties=dict(children=relationship(Child))
+            Parent,
+            self.tables.parents,
+            properties=dict(children=relationship(Child)),
         )
-        mapper(Child, self.children)
+        mapper(Child, self.tables.children)
         p = Parent("p1")
         p.kids.extend(["c1", "c2"])
         r1 = pickle.loads(pickle.dumps(p))
@@ -1404,12 +1415,12 @@ class ReconstitutionTest(fixtures.TestBase):
     def test_pickle_set(self):
         mapper(
             Parent,
-            self.parents,
+            self.tables.parents,
             properties=dict(
                 children=relationship(Child, collection_class=set)
             ),
         )
-        mapper(Child, self.children)
+        mapper(Child, self.tables.children)
         p = Parent("p1")
         p.kids.update(["c1", "c2"])
         r1 = pickle.loads(pickle.dumps(p))
@@ -1422,7 +1433,7 @@ class ReconstitutionTest(fixtures.TestBase):
     def test_pickle_dict(self):
         mapper(
             Parent,
-            self.parents,
+            self.tables.parents,
             properties=dict(
                 children=relationship(
                     KVChild,
@@ -1432,7 +1443,7 @@ class ReconstitutionTest(fixtures.TestBase):
                 )
             ),
         )
-        mapper(KVChild, self.children)
+        mapper(KVChild, self.tables.children)
         p = Parent("p1")
         p.kids.update({"c1": "v1", "c2": "v2"})
         assert p.kids == {"c1": "c1", "c2": "c2"}
@@ -1596,8 +1607,10 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
             Keyword,
             keywords,
             properties={
-                "user_keyword": relationship(UserKeyword, uselist=False),
-                "user_keywords": relationship(UserKeyword),
+                "user_keyword": relationship(
+                    UserKeyword, uselist=False, back_populates="keyword"
+                ),
+                "user_keywords": relationship(UserKeyword, viewonly=True),
             },
         )
 
@@ -1606,7 +1619,9 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
             userkeywords,
             properties={
                 "user": relationship(User, backref="user_keywords"),
-                "keyword": relationship(Keyword),
+                "keyword": relationship(
+                    Keyword, back_populates="user_keyword"
+                ),
             },
         )
         mapper(
@@ -1614,7 +1629,7 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         UserKeyword, User, Keyword, Singular = (
             cls.classes.UserKeyword,
             cls.classes.User,
@@ -1622,7 +1637,7 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
             cls.classes.Singular,
         )
 
-        session = sessionmaker()()
+        session = Session(connection)
         words = ("quick", "brown", "fox", "jumped", "over", "the", "lazy")
         for ii in range(16):
             user = User("user%d" % ii)
@@ -1649,7 +1664,9 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         session.commit()
         cls.u = user
         cls.kw = user.keywords[0]
-        cls.session = session
+
+        # TODO: this is not the correct pattern, use session per test
+        cls.session = Session(testing.db)
 
     def _equivalent(self, q_proxy, q_direct):
         proxy_sql = q_proxy.statement.compile(dialect=default.DefaultDialect())
@@ -1658,6 +1675,23 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
         eq_(str(proxy_sql), str(direct_sql))
         eq_(q_proxy.all(), q_direct.all())
+
+    def test_no_straight_expr(self):
+        User = self.classes.User
+
+        assert_raises_message(
+            NotImplementedError,
+            "The association proxy can't be used as a plain column expression",
+            func.foo,
+            User.singular_value,
+        )
+
+        assert_raises_message(
+            NotImplementedError,
+            "The association proxy can't be used as a plain column expression",
+            self.session.query,
+            User.singular_value,
+        )
 
     def test_filter_any_criterion_ul_scalar(self):
         UserKeyword, User = self.classes.UserKeyword, self.classes.User
@@ -2260,7 +2294,7 @@ class ComparatorTest(fixtures.MappedTest, AssertsCompiledSQL):
 
 
 class DictOfTupleUpdateTest(fixtures.TestBase):
-    def setup(self):
+    def setup_test(self):
         class B(object):
             def __init__(self, key, elem):
                 self.key = key
@@ -2400,7 +2434,7 @@ class CompositeAccessTest(fixtures.DeclarativeMappedTest):
 
 
 class AttributeAccessTest(fixtures.TestBase):
-    def teardown(self):
+    def teardown_test(self):
         clear_mappers()
 
     def test_resolve_aliased_class(self):
@@ -3154,7 +3188,10 @@ class MultiOwnerTest(
         self._assert_raises_ambiguous(lambda: D.c_data == 5)
 
     def test_rel_expressions_not_available(self):
-        B, D, = self.classes("B", "D")
+        (
+            B,
+            D,
+        ) = self.classes("B", "D")
 
         self._assert_raises_ambiguous(lambda: D.c_data.any(B.id == 5))
 
@@ -3330,7 +3367,7 @@ class ProxyHybridTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_comparator_ambiguous(self):
         A, B = self.classes("A", "B")
 
-        s = Session()
+        s = fixture_session()
         self.assert_compile(
             s.query(A).filter(A.b_data.any()),
             "SELECT a.id AS a_id FROM a WHERE EXISTS "
@@ -3340,7 +3377,7 @@ class ProxyHybridTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_explicit_expr(self):
         (C,) = self.classes("C")
 
-        s = Session()
+        s = fixture_session()
         self.assert_compile(
             s.query(C).filter_by(attr=5),
             "SELECT c.id AS c_id, c.b_id AS c_b_id FROM c WHERE EXISTS "
@@ -3426,7 +3463,7 @@ class ScopeBehaviorTest(fixtures.DeclarativeMappedTest):
             data = Column(String(50))
             bs = relationship("B")
 
-            b_dyn = relationship("B", lazy="dynamic")
+            b_dyn = relationship("B", lazy="dynamic", viewonly=True)
 
             b_data = association_proxy("bs", "data")
 
@@ -3440,10 +3477,10 @@ class ScopeBehaviorTest(fixtures.DeclarativeMappedTest):
             data = Column(String(50))
 
     @classmethod
-    def insert_data(cls):
+    def insert_data(cls, connection):
         A, B = cls.classes("A", "B")
 
-        s = Session(testing.db)
+        s = Session(connection)
         s.add_all(
             [
                 A(id=1, bs=[B(data="b1"), B(data="b2")]),

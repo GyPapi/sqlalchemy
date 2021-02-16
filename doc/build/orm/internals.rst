@@ -6,54 +6,61 @@ ORM Internals
 Key ORM constructs, not otherwise covered in other
 sections, are listed here.
 
-.. currentmodule: sqlalchemy.orm
+.. currentmodule:: sqlalchemy.orm
 
-.. autoclass:: sqlalchemy.orm.state.AttributeState
+.. autoclass:: AttributeState
     :members:
 
-.. autoclass:: sqlalchemy.orm.util.CascadeOptions
+.. autoclass:: CascadeOptions
     :members:
 
-.. autoclass:: sqlalchemy.orm.instrumentation.ClassManager
-    :members:
-    :inherited-members:
-
-.. autoclass:: sqlalchemy.orm.properties.ColumnProperty
+.. autoclass:: ClassManager
     :members:
     :inherited-members:
 
-.. autoclass:: sqlalchemy.orm.properties.ComparableProperty
+.. autoclass:: ColumnProperty
     :members:
 
-.. autoclass:: sqlalchemy.orm.descriptor_props.CompositeProperty
-    :members:
+    .. attribute:: Comparator.expressions
 
+         The full sequence of columns referenced by this
+         attribute, adjusted for any aliasing in progress.
 
-.. autoclass:: sqlalchemy.orm.attributes.Event
-    :members:
+         .. versionadded:: 1.3.17
 
-.. autoclass:: sqlalchemy.orm.identity.IdentityMap
-    :members:
+         .. seealso::
 
-.. autoclass:: sqlalchemy.orm.base.InspectionAttr
-    :members:
+            :ref:`maptojoin` - usage example
 
-.. autoclass:: sqlalchemy.orm.base.InspectionAttrInfo
-    :members:
-
-.. autoclass:: sqlalchemy.orm.state.InstanceState
+.. autoclass:: CompositeProperty
     :members:
 
 
-.. autoclass:: sqlalchemy.orm.attributes.InstrumentedAttribute
+.. autoclass:: AttributeEvent
+    :members:
+
+.. autoclass:: IdentityMap
+    :members:
+
+.. autoclass:: InspectionAttr
+    :members:
+
+.. autoclass:: InspectionAttrInfo
+    :members:
+
+.. autoclass:: InstanceState
+    :members:
+
+
+.. autoclass:: InstrumentedAttribute
     :members: __get__, __set__, __delete__
     :undoc-members:
 
-.. autodata:: sqlalchemy.orm.interfaces.MANYTOONE
+.. autodata:: MANYTOONE
 
-.. autodata:: sqlalchemy.orm.interfaces.MANYTOMANY
+.. autodata:: MANYTOMANY
 
-.. autoclass:: sqlalchemy.orm.interfaces.MapperProperty
+.. autoclass:: MapperProperty
     :members:
 
     .. py:attribute:: info
@@ -63,7 +70,7 @@ sections, are listed here.
 
         The dictionary is generated when first accessed.  Alternatively,
         it can be specified as a constructor argument to the
-        :func:`.column_property`, :func:`.relationship`, or :func:`.composite`
+        :func:`.column_property`, :func:`_orm.relationship`, or :func:`.composite`
         functions.
 
         .. versionchanged:: 1.0.0 :attr:`.InspectionAttr.info` moved
@@ -76,31 +83,35 @@ sections, are listed here.
 
             :attr:`.SchemaItem.info`
 
-.. autodata:: sqlalchemy.orm.interfaces.NOT_EXTENSION
+.. autodata:: NOT_EXTENSION
+
+.. autofunction:: merge_result
+
+.. autofunction:: merge_frozen_result
 
 
-.. autodata:: sqlalchemy.orm.interfaces.ONETOMANY
+.. autodata:: ONETOMANY
 
-.. autoclass:: sqlalchemy.orm.interfaces.PropComparator
+.. autoclass:: PropComparator
     :members:
     :inherited-members:
 
-.. autoclass:: sqlalchemy.orm.properties.RelationshipProperty
+.. autoclass:: RelationshipProperty
     :members:
     :inherited-members:
 
-.. autoclass:: sqlalchemy.orm.descriptor_props.SynonymProperty
+.. autoclass:: SynonymProperty
     :members:
     :inherited-members:
 
-.. autoclass:: sqlalchemy.orm.query.QueryContext
+.. autoclass:: QueryContext
     :members:
 
 
-.. autoclass:: sqlalchemy.orm.attributes.QueryableAttribute
+.. autoclass:: QueryableAttribute
     :members:
     :inherited-members:
 
-.. autoclass:: sqlalchemy.orm.session.UOWTransaction
+.. autoclass:: UOWTransaction
     :members:
 
